@@ -315,6 +315,25 @@ def run_execution_engine():
     position    = None
     entry_price = 0.0
     entry_time  = None
+    def run_execution_engine():
+    ex          = ccxt.binanceusdm({"enableRateLimit": True})
+    capital     = CAPITAL
+    position    = None
+    entry_price = 0.0
+
+    # decision_output.txt nahi hai to wait karo
+    print("[EXECUTE] Waiting for first decision signal...")
+    while True:
+        try:
+            with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+                content = f.read()
+            if "SIGNAL:" in content:
+                print("[EXECUTE] Signal file found! Starting...")
+                break
+        except:
+            pass
+        print("[EXECUTE] No signal file yet — waiting 30s...")
+        time.sleep(30)
     pos_size    = 0.0
     sl_price    = 0.0
     tp_price    = 0.0
