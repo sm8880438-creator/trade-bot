@@ -9,7 +9,6 @@ from flask import Flask
 
 # ─────────────────────────────────────────────
 #  KEEP-ALIVE SERVER
-#  Render ko lagta hai bot active hai
 # ─────────────────────────────────────────────
 app = Flask(__name__)
 
@@ -22,14 +21,18 @@ def run_server():
 
 
 # ─────────────────────────────────────────────
-#  DECISION ENGINE
+#  IMPORTS
 # ─────────────────────────────────────────────
 import ccxt
 import pandas as pd
 import numpy as np
 import json
+import requests
 from datetime import datetime
 
+# ─────────────────────────────────────────────
+#  CONFIG
+# ─────────────────────────────────────────────
 SYMBOL         = "ETH/USDT:USDT"
 API_KEY        = ""
 API_SECRET     = ""
@@ -49,7 +52,20 @@ SELL_THRESHOLD = -0.20
 FVG_LOOKBACK   = 50
 MIN_FVG_SIZE   = 0.05
 
+BOT_TOKEN       = "8161773850:AAFcWw3UnlSe2TrMooB2uvgZQZUqIW0zW2w"
+CHAT_ID         = "7102976298"
+CAPITAL         = 10000
+RISK_PERCENT    = 2
+LEVERAGE        = 5
+STOP_LOSS_PCT   = 0.8
+TAKE_PROFIT_PCT = 1.6
+MIN_CONFIDENCE  = 40
+EXECUTE_SCAN    = 10
 
+
+# ─────────────────────────────────────────────
+#  EXCHANGE
+# ─────────────────────────────────────────────
 def get_exchange():
     ex = ccxt.binanceusdm({
         "apiKey":          API_KEY,
@@ -61,6 +77,24 @@ def get_exchange():
     return ex
 
 
+# ─────────────────────────────────────────────
+#  TELEGRAM
+# ─────────────────────────────────────────────
+def send_telegram(message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    for attempt in range(3):
+        try:
+            r = requests.post(url, data={"chat_id": CHAT_ID, "text": message}, timeout=15)
+            if r.status_code == 200:
+                return
+        except Exception as e:
+            print(f"[WARN] Telegram attempt {attempt+1}/3: {e}")
+            time.sleep(3)
+
+
+# ─────────────────────────────────────────────
+#  MARKET STRUCTURE
+# ─────────────────────────────────────────────
 def detect_structure(df, swing_bars=5):
     highs = df["high"].values
     lows  = df["low"].values
@@ -82,6 +116,9 @@ def detect_structure(df, swing_bars=5):
     return "RANGE"
 
 
+# ─────────────────────────────────────────────
+#  FVG DETECTION
+# ─────────────────────────────────────────────
 def detect_fvg(df, lookback=50, min_gap_pct=0.05):
     fvgs   = []
     recent = df.tail(lookback).reset_index(drop=True)
@@ -96,16 +133,16 @@ def detect_fvg(df, lookback=50, min_gap_pct=0.05):
             gap_size   = ((gap_top - gap_bottom) / gap_bottom) * 100
             if gap_size >= min_gap_pct:
                 fvgs.append({
-                    "type":    "BULL",
-                    "top":     round(gap_top, 4),
-                    "bottom":  round(gap_bottom, 4),
-                    "mid":     round((gap_top + gap_bottom) / 2, 4),
-                    "size":    round(gap_size, 3),
-                    "fresh":   (i >= n - 5),
-                    "retest":  (current_price >= gap_bottom * 0.998 and
-                                current_price <= gap_top * 1.002),
-                    "filled":  (current_price <= gap_top and
-                                current_price >= gap_bottom),
+                    "type":   "BULL",
+                    "top":    round(gap_top, 4),
+                    "bottom": round(gap_bottom, 4),
+                    "mid":    round((gap_top + gap_bottom) / 2, 4),
+                    "size":   round(gap_size, 3),
+                    "fresh":  (i >= n - 5),
+                    "retest": (current_price >= gap_bottom * 0.998 and
+                               current_price <= gap_top * 1.002),
+                    "filled": (current_price <= gap_top and
+                               current_price >= gap_bottom),
                 })
         elif c1["low"] > c3["high"]:
             gap_top    = c1["low"]
@@ -113,20 +150,23 @@ def detect_fvg(df, lookback=50, min_gap_pct=0.05):
             gap_size   = ((gap_top - gap_bottom) / gap_bottom) * 100
             if gap_size >= min_gap_pct:
                 fvgs.append({
-                    "type":    "BEAR",
-                    "top":     round(gap_top, 4),
-                    "bottom":  round(gap_bottom, 4),
-                    "mid":     round((gap_top + gap_bottom) / 2, 4),
-                    "size":    round(gap_size, 3),
-                    "fresh":   (i >= n - 5),
-                    "retest":  (current_price >= gap_bottom * 0.998 and
-                                current_price <= gap_top * 1.002),
-                    "filled":  (current_price >= gap_bottom and
-                                current_price <= gap_top),
+                    "type":   "BEAR",
+                    "top":    round(gap_top, 4),
+                    "bottom": round(gap_bottom, 4),
+                    "mid":    round((gap_top + gap_bottom) / 2, 4),
+                    "size":   round(gap_size, 3),
+                    "fresh":  (i >= n - 5),
+                    "retest": (current_price >= gap_bottom * 0.998 and
+                               current_price <= gap_top * 1.002),
+                    "filled": (current_price >= gap_bottom and
+                               current_price <= gap_top),
                 })
     return fvgs
 
 
+# ─────────────────────────────────────────────
+#  FVG SIGNAL
+# ─────────────────────────────────────────────
 def fvg_signal(fvgs, structure, current_price):
     if not fvgs:
         return 0.0, "No FVG found"
@@ -165,6 +205,9 @@ def fvg_signal(fvgs, structure, current_price):
     return float(np.clip(score, -1.0, 1.0)), " | ".join(reasons)
 
 
+# ─────────────────────────────────────────────
+#  TIMEFRAME ANALYSIS
+# ─────────────────────────────────────────────
 def analyze_timeframe(exchange, symbol, tf):
     try:
         bars = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=200)
@@ -189,6 +232,9 @@ def analyze_timeframe(exchange, symbol, tf):
     }
 
 
+# ─────────────────────────────────────────────
+#  FUNDING RATE
+# ─────────────────────────────────────────────
 def get_funding_rate(exchange, symbol):
     try:
         fr = exchange.fetch_funding_rate(symbol)
@@ -197,6 +243,38 @@ def get_funding_rate(exchange, symbol):
         return 0.0
 
 
+# ─────────────────────────────────────────────
+#  SIGNAL READER
+# ─────────────────────────────────────────────
+def read_signal():
+    try:
+        with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        data = {}
+        for line in lines:
+            if ":" in line:
+                key, val = line.split(":", 1)
+                data[key.strip()] = val.strip()
+        return (
+            data.get("SIGNAL", "WAIT"),
+            int(data.get("CONFIDENCE", "0")),
+            float(data.get("SCORE", "0")),
+            data.get("REASON", ""),
+        )
+    except:
+        return "WAIT", 0, 0.0, ""
+
+
+# ─────────────────────────────────────────────
+#  PnL CALCULATOR
+# ─────────────────────────────────────────────
+def calc_pnl(side, entry, exit_price, pos_size):
+    return (exit_price - entry) * pos_size if side == "BUY" else (entry - exit_price) * pos_size
+
+
+# ─────────────────────────────────────────────
+#  DECISION ENGINE THREAD
+# ─────────────────────────────────────────────
 def run_decision_engine():
     exchange = get_exchange()
     print("[DECISION] Engine started")
@@ -219,10 +297,10 @@ def run_decision_engine():
             funding = get_funding_rate(exchange, SYMBOL)
             if funding > 0.0005:
                 total_score -= 0.05
-                all_reasons.append(f"Funding HIGH -> bearish")
+                all_reasons.append("Funding HIGH -> bearish")
             elif funding < -0.0005:
                 total_score += 0.05
-                all_reasons.append(f"Funding NEGATIVE -> bullish")
+                all_reasons.append("Funding NEGATIVE -> bullish")
             confidence = int(abs(total_score) * 100)
             if total_score >= BUY_THRESHOLD:
                 signal = "BUY"
@@ -259,69 +337,19 @@ def run_decision_engine():
 
 
 # ─────────────────────────────────────────────
-#  EXECUTION ENGINE
+#  EXECUTION ENGINE THREAD
 # ─────────────────────────────────────────────
-import requests
-
-BOT_TOKEN       = "8161773850:AAFcWw3UnlSe2TrMooB2uvgZQZUqIW0zW2w"
-CHAT_ID         = "7102976298"
-CAPITAL         = 10000
-RISK_PERCENT    = 2
-LEVERAGE        = 5
-STOP_LOSS_PCT   = 0.8
-TAKE_PROFIT_PCT = 1.6
-MIN_CONFIDENCE  = 40
-EXECUTE_SCAN    = 10
-
-
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    for attempt in range(3):
-        try:
-            r = requests.post(url, data={"chat_id": CHAT_ID, "text": message}, timeout=15)
-            if r.status_code == 200:
-                return
-        except Exception as e:
-            print(f"[WARN] Telegram attempt {attempt+1}/3: {e}")
-            time.sleep(3)
-
-
-def read_signal():
-    try:
-        with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
-            lines = f.read().splitlines()
-        data = {}
-        for line in lines:
-            if ":" in line:
-                key, val = line.split(":", 1)
-                data[key.strip()] = val.strip()
-        return (
-            data.get("SIGNAL", "WAIT"),
-            int(data.get("CONFIDENCE", "0")),
-            float(data.get("SCORE", "0")),
-            data.get("REASON", ""),
-        )
-    except:
-        return "WAIT", 0, 0.0, ""
-
-
-def calc_pnl(side, entry, exit_price, pos_size):
-    return (exit_price - entry) * pos_size if side == "BUY" else (entry - exit_price) * pos_size
-
-
 def run_execution_engine():
     ex          = ccxt.binanceusdm({"enableRateLimit": True})
     capital     = CAPITAL
     position    = None
     entry_price = 0.0
     entry_time  = None
-    def run_execution_engine():
-    ex          = ccxt.binanceusdm({"enableRateLimit": True})
-    capital     = CAPITAL
-    position    = None
-    entry_price = 0.0
+    pos_size    = 0.0
+    sl_price    = 0.0
+    tp_price    = 0.0
 
-    # decision_output.txt nahi hai to wait karo
+    # Pehla signal aane tak wait karo
     print("[EXECUTE] Waiting for first decision signal...")
     while True:
         try:
@@ -332,11 +360,8 @@ def run_execution_engine():
                 break
         except:
             pass
-        print("[EXECUTE] No signal file yet — waiting 30s...")
+        print("[EXECUTE] No signal yet — waiting 30s...")
         time.sleep(30)
-    pos_size    = 0.0
-    sl_price    = 0.0
-    tp_price    = 0.0
 
     print("[EXECUTE] Engine started")
     send_telegram(
@@ -349,9 +374,9 @@ def run_execution_engine():
     while True:
         try:
             signal, confidence, score, reason = read_signal()
-            ticker = ex.fetch_ticker(SYMBOL)
+            ticker        = ex.fetch_ticker(SYMBOL)
             current_price = float(ticker["last"])
-            now = datetime.now().strftime("%H:%M:%S")
+            now           = datetime.now().strftime("%H:%M:%S")
 
             # SL/TP check
             if position is not None:
@@ -405,9 +430,12 @@ def run_execution_engine():
                         f"Reason  : {reason[:200]}"
                     )
                 else:
-                    print(f"[{now}] Price={current_price:.2f} | {signal} | Conf={confidence}% | WAIT")
+                    if signal == "WAIT":
+                        print(f"[{now}] Price={current_price:.2f} | WAIT")
+                    else:
+                        print(f"[{now}] Price={current_price:.2f} | Conf {confidence}% < {MIN_CONFIDENCE}% — skip")
 
-            # Hold/Flip check
+            # Hold/Flip
             else:
                 if (position == "BUY"  and signal == "SELL" and confidence >= MIN_CONFIDENCE) or \
                    (position == "SELL" and signal == "BUY"  and confidence >= MIN_CONFIDENCE):
@@ -445,7 +473,7 @@ def run_execution_engine():
                     )
                 else:
                     pnl_now = calc_pnl(position, entry_price, current_price, pos_size)
-                    print(f"[{now}] Price={current_price:.2f} | Signal={signal} | Conf={confidence}% | Holding {position} | PnL={pnl_now:+.2f} USDT")
+                    print(f"[{now}] Price={current_price:.2f} | {signal} | Conf={confidence}% | Holding {position} | PnL={pnl_now:+.2f} USDT")
 
         except Exception as e:
             print(f"[EXECUTE ERROR] {e}")
@@ -461,17 +489,14 @@ if __name__ == "__main__":
     print("  TRADE BOT STARTING...")
     print("=" * 50)
 
-    # Flask server — keep alive
     t1 = threading.Thread(target=run_server)
     t1.daemon = True
     t1.start()
 
-    # Decision engine
     t2 = threading.Thread(target=run_decision_engine)
     t2.daemon = True
     t2.start()
 
-    # Execution engine
     t3 = threading.Thread(target=run_execution_engine)
     t3.daemon = True
     t3.start()
@@ -481,6 +506,5 @@ if __name__ == "__main__":
     print("[INFO] Decision     : har 300s")
     print("[INFO] Execution    : har 10s")
 
-    # Main thread alive rakhna
     while True:
         time.sleep(60)
