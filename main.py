@@ -1,7 +1,7 @@
 """
 TRADE BOT — Main Entry Point
 decision_engine + execution_engine + keep-alive server
-Trailing Stop Loss + Periodic Updates + Capital Used added
+Trailing Stop Loss + Periodic Updates added
 """
 
 import threading
@@ -62,8 +62,8 @@ TRAILING_STOP  = True
 TRAIL_TRIGGER  = 0.5
 TRAIL_OFFSET   = 0.4
 
-# Periodic Update
-UPDATE_INTERVAL = 1800  # 30 min
+# Periodic Update — har kitne seconds mein Telegram update bhejo
+UPDATE_INTERVAL = 1800   # 1800s = 30 min
 
 
 # ─────────────────────────────────────────────
@@ -276,49 +276,51 @@ def calc_pnl(side, entry, exit_price, pos_size):
 
 
 # ─────────────────────────────────────────────
-#  SHARED STATE
-# ─────────────────────────────────────────────
-trade_state = {
-    "position":     None,
-    "entry_price":  0.0,
-    "entry_time":   None,
-    "sl_price":     0.0,
-    "tp_price":     0.0,
-    "pos_size":     0.0,
-    "capital_used": 0.0,
-    "capital":      CAPITAL,
-    "last_signal":  "WAIT",
-    "last_conf":    0,
-    "last_price":   0.0,
-}
-
-
-# ─────────────────────────────────────────────
 #  PERIODIC UPDATE THREAD
 # ─────────────────────────────────────────────
+
+# Shared state — execution engine yeh update karta hai
+trade_state = {
+    "position":    None,
+    "entry_price": 0.0,
+    "entry_time":  None,
+    "sl_price":    0.0,
+    "tp_price":    0.0,
+    "pos_size":    0.0,
+    "capital":     CAPITAL,
+    "last_signal": "WAIT",
+    "last_conf":   0,
+    "last_price":  0.0,
+}
+
 def run_periodic_update():
-    time.sleep(UPDATE_INTERVAL)
+    """
+    Har 30 min mein Telegram par update bhejta hai:
+    - Agar trade open hai: P&L, SL/TP distance
+    - Agar koi trade nahi: market status
+    """
+    time.sleep(UPDATE_INTERVAL)   # pehli baar 30 min baad
     while True:
         try:
-            now      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            position = trade_state["position"]
-            price    = trade_state["last_price"]
-            signal   = trade_state["last_signal"]
-            conf     = trade_state["last_conf"]
-            capital  = trade_state["capital"]
+            now        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            position   = trade_state["position"]
+            price      = trade_state["last_price"]
+            signal     = trade_state["last_signal"]
+            conf       = trade_state["last_conf"]
+            capital    = trade_state["capital"]
 
             if position is not None:
-                entry        = trade_state["entry_price"]
-                sl           = trade_state["sl_price"]
-                tp           = trade_state["tp_price"]
-                psize        = trade_state["pos_size"]
-                etime        = trade_state["entry_time"]
-                capital_used = trade_state["capital_used"]
+                # Trade open hai — P&L update
+                entry  = trade_state["entry_price"]
+                sl     = trade_state["sl_price"]
+                tp     = trade_state["tp_price"]
+                psize  = trade_state["pos_size"]
+                etime  = trade_state["entry_time"]
 
-                pnl      = calc_pnl(position, entry, price, psize)
-                dur      = str(datetime.now() - etime).split(".")[0]
-                pnl_icon = "+" if pnl >= 0 else ""
+                pnl    = calc_pnl(position, entry, price, psize)
+                dur    = str(datetime.now() - etime).split(".")[0]
 
+                # TP/SL kitna door hai
                 if position == "BUY":
                     tp_dist = ((tp - price) / price) * 100
                     sl_dist = ((price - sl) / price) * 100
@@ -326,22 +328,25 @@ def run_periodic_update():
                     tp_dist = ((price - tp) / price) * 100
                     sl_dist = ((sl - price) / price) * 100
 
+                pnl_icon = "+" if pnl >= 0 else ""
+
                 send_telegram(
                     f"--- TRADE UPDATE ---\n"
-                    f"Time         : {now}\n"
-                    f"Side         : {position}\n"
-                    f"Entry        : {entry:.2f}\n"
-                    f"Price        : {price:.2f}\n"
-                    f"PnL          : {pnl_icon}{pnl:.2f} USDT\n"
-                    f"Capital Used : {capital_used:.2f} USDT\n"
-                    f"Capital      : {capital:.2f} USDT\n"
-                    f"Duration     : {dur}\n"
+                    f"Time    : {now}\n"
+                    f"Side    : {position}\n"
+                    f"Entry   : {entry:.2f}\n"
+                    f"Price   : {price:.2f}\n"
+                    f"PnL     : {pnl_icon}{pnl:.2f} USDT\n"
+                    f"Capital : {capital:.2f} USDT\n"
+                    f"Duration: {dur}\n"
                     f"--------------------\n"
-                    f"TP           : {tp:.2f} ({tp_dist:.2f}% door)\n"
-                    f"SL           : {sl:.2f} ({sl_dist:.2f}% door)\n"
-                    f"Signal       : {signal} ({conf}%)"
+                    f"TP      : {tp:.2f} ({tp_dist:.2f}% door)\n"
+                    f"SL      : {sl:.2f} ({sl_dist:.2f}% door)\n"
+                    f"Signal  : {signal} ({conf}%)"
                 )
+
             else:
+                # Koi trade nahi — market status
                 send_telegram(
                     f"--- MARKET UPDATE ---\n"
                     f"Time    : {now}\n"
@@ -434,7 +439,6 @@ def run_execution_engine():
     pos_size    = 0.0
     sl_price    = 0.0
     tp_price    = 0.0
-    capital_used = 0.0
 
     # Pehla signal aane tak wait karo
     print("[EXECUTE] Waiting for first decision signal...")
@@ -466,19 +470,18 @@ def run_execution_engine():
             now           = datetime.now().strftime("%H:%M:%S")
 
             # Shared state update
-            trade_state["last_signal"]  = signal
-            trade_state["last_conf"]    = confidence
-            trade_state["last_price"]   = current_price
-            trade_state["capital"]      = capital
-            trade_state["position"]     = position
-            trade_state["entry_price"]  = entry_price
-            trade_state["entry_time"]   = entry_time
-            trade_state["sl_price"]     = sl_price
-            trade_state["tp_price"]     = tp_price
-            trade_state["pos_size"]     = pos_size
-            trade_state["capital_used"] = capital_used
+            trade_state["last_signal"] = signal
+            trade_state["last_conf"]   = confidence
+            trade_state["last_price"]  = current_price
+            trade_state["capital"]     = capital
+            trade_state["position"]    = position
+            trade_state["entry_price"] = entry_price
+            trade_state["entry_time"]  = entry_time
+            trade_state["sl_price"]    = sl_price
+            trade_state["tp_price"]    = tp_price
+            trade_state["pos_size"]    = pos_size
 
-            # Trailing SL
+            # Trailing SL update
             if position is not None and TRAILING_STOP:
                 if position == "BUY":
                     profit_pct = ((current_price - entry_price) / entry_price) * 100
@@ -512,35 +515,31 @@ def run_execution_engine():
                     print(f"[EXECUTE] {label} | {position} | PnL={pnl:+.2f} | Capital={capital:.2f}")
                     send_telegram(
                         f"TRADE CLOSED — {label}\n"
-                        f"Side         : {position}\n"
-                        f"Entry        : {entry_price:.2f}\n"
-                        f"Exit         : {current_price:.2f}\n"
-                        f"PnL          : {pnl:+.2f} USDT\n"
-                        f"Capital Used : {capital_used:.2f} USDT\n"
-                        f"Capital      : {capital:.2f} USDT\n"
-                        f"Time         : {duration}"
+                        f"Side    : {position}\n"
+                        f"Entry   : {entry_price:.2f}\n"
+                        f"Exit    : {current_price:.2f}\n"
+                        f"PnL     : {pnl:+.2f} USDT\n"
+                        f"Capital : {capital:.2f} USDT\n"
+                        f"Time    : {duration}"
                     )
-                    position     = None
-                    entry_price  = 0.0
-                    entry_time   = None
-                    pos_size     = 0.0
-                    sl_price     = 0.0
-                    tp_price     = 0.0
-                    capital_used = 0.0
-                    trade_state["position"]     = None
-                    trade_state["capital_used"] = 0.0
+                    position    = None
+                    entry_price = 0.0
+                    entry_time  = None
+                    pos_size    = 0.0
+                    sl_price    = 0.0
+                    tp_price    = 0.0
+                    trade_state["position"] = None
                     time.sleep(EXECUTE_SCAN)
                     continue
 
             # Entry check
             if position is None:
                 if signal in ["BUY", "SELL"] and confidence >= MIN_CONFIDENCE:
-                    risk_amount  = capital * (RISK_PERCENT / 100)
-                    capital_used = risk_amount * LEVERAGE
-                    pos_size     = capital_used / current_price
-                    entry_price  = current_price
-                    entry_time   = datetime.now()
-                    position     = signal
+                    risk_amount = capital * (RISK_PERCENT / 100)
+                    pos_size    = (risk_amount * LEVERAGE) / current_price
+                    entry_price = current_price
+                    entry_time  = datetime.now()
+                    position    = signal
                     if signal == "BUY":
                         sl_price = entry_price * (1 - STOP_LOSS_PCT / 100)
                         tp_price = entry_price * (1 + TAKE_PROFIT_PCT / 100)
@@ -550,15 +549,13 @@ def run_execution_engine():
                     print(f"[EXECUTE] TRADE OPENED | {position} | Entry={entry_price:.2f} | SL={sl_price:.2f} | TP={tp_price:.2f}")
                     send_telegram(
                         f"TRADE OPENED\n"
-                        f"Side         : {position}\n"
-                        f"Entry        : {entry_price:.2f}\n"
-                        f"SL           : {sl_price:.2f}\n"
-                        f"TP           : {tp_price:.2f}\n"
-                        f"Size         : {pos_size:.4f} ETH\n"
-                        f"Capital Used : {capital_used:.2f} USDT\n"
-                        f"Total Capital: {capital:.2f} USDT\n"
-                        f"Conf         : {confidence}%\n"
-                        f"Reason       : {reason[:200]}"
+                        f"Side    : {position}\n"
+                        f"Entry   : {entry_price:.2f}\n"
+                        f"SL      : {sl_price:.2f}\n"
+                        f"TP      : {tp_price:.2f}\n"
+                        f"Size    : {pos_size:.4f} ETH\n"
+                        f"Conf    : {confidence}%\n"
+                        f"Reason  : {reason[:200]}"
                     )
                 else:
                     if signal == "WAIT":
@@ -575,20 +572,18 @@ def run_execution_engine():
                     duration = str(datetime.now() - entry_time).split(".")[0]
                     send_telegram(
                         f"TRADE CLOSED — Signal Flip\n"
-                        f"Side         : {position}\n"
-                        f"Entry        : {entry_price:.2f}\n"
-                        f"Exit         : {current_price:.2f}\n"
-                        f"PnL          : {pnl:+.2f} USDT\n"
-                        f"Capital Used : {capital_used:.2f} USDT\n"
-                        f"Capital      : {capital:.2f} USDT\n"
-                        f"Time         : {duration}"
+                        f"Side    : {position}\n"
+                        f"Entry   : {entry_price:.2f}\n"
+                        f"Exit    : {current_price:.2f}\n"
+                        f"PnL     : {pnl:+.2f} USDT\n"
+                        f"Capital : {capital:.2f} USDT\n"
+                        f"Time    : {duration}"
                     )
-                    risk_amount  = capital * (RISK_PERCENT / 100)
-                    capital_used = risk_amount * LEVERAGE
-                    pos_size     = capital_used / current_price
-                    entry_price  = current_price
-                    entry_time   = datetime.now()
-                    position     = signal
+                    risk_amount = capital * (RISK_PERCENT / 100)
+                    pos_size    = (risk_amount * LEVERAGE) / current_price
+                    entry_price = current_price
+                    entry_time  = datetime.now()
+                    position    = signal
                     if signal == "BUY":
                         sl_price = entry_price * (1 - STOP_LOSS_PCT / 100)
                         tp_price = entry_price * (1 + TAKE_PROFIT_PCT / 100)
@@ -598,12 +593,11 @@ def run_execution_engine():
                     print(f"[EXECUTE] REVERSED -> {position} | Entry={entry_price:.2f}")
                     send_telegram(
                         f"TRADE REVERSED\n"
-                        f"New Side     : {position}\n"
-                        f"Entry        : {entry_price:.2f}\n"
-                        f"SL           : {sl_price:.2f}\n"
-                        f"TP           : {tp_price:.2f}\n"
-                        f"Capital Used : {capital_used:.2f} USDT\n"
-                        f"Conf         : {confidence}%"
+                        f"New Side: {position}\n"
+                        f"Entry   : {entry_price:.2f}\n"
+                        f"SL      : {sl_price:.2f}\n"
+                        f"TP      : {tp_price:.2f}\n"
+                        f"Conf    : {confidence}%"
                     )
                 else:
                     pnl_now = calc_pnl(position, entry_price, current_price, pos_size)
