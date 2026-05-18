@@ -1,6 +1,6 @@
 """
-TRADE BOT v4.0 — Main Entry Point
-Edge: Weekly Filter + Market Structure + FVG + Key Levels
+TRADE BOT v4.1 — Main Entry Point
+Fix: Periodic update thread sync issue fixed
 """
 
 import threading
@@ -31,21 +31,20 @@ SYMBOL         = "ETH/USDT:USDT"
 API_KEY        = ""
 API_SECRET     = ""
 
-# Timeframes — Top Down
 TIMEFRAMES = {
-    "1w":  0.30,   # Weekly filter — sabse important
-    "1d":  0.25,   # Daily trend
-    "4h":  0.25,   # Setup
-    "1h":  0.20,   # Entry timing
+    "1w":  0.30,
+    "1d":  0.25,
+    "4h":  0.25,
+    "1h":  0.20,
 }
 
-DECISION_SCAN  = 300
-OUTPUT_FILE    = "decision_output.txt"
-LOG_FILE       = "decision_log.json"
-BUY_THRESHOLD  =  0.25
-SELL_THRESHOLD = -0.25
-FVG_LOOKBACK   = 50
-MIN_FVG_SIZE   = 0.05
+DECISION_SCAN   = 300
+OUTPUT_FILE     = "decision_output.txt"
+LOG_FILE        = "decision_log.json"
+BUY_THRESHOLD   =  0.25
+SELL_THRESHOLD  = -0.25
+FVG_LOOKBACK    = 50
+MIN_FVG_SIZE    = 0.05
 
 BOT_TOKEN       = "8161773850:AAFcWw3UnlSe2TrMooB2uvgZQZUqIW0zW2w"
 CHAT_ID         = "7102976298"
@@ -54,17 +53,13 @@ RISK_PERCENT    = 5
 LEVERAGE        = 5
 STOP_LOSS_PCT   = 0.8
 TAKE_PROFIT_PCT = 0.8
-MIN_CONFIDENCE  = 50      # 50% se kam par trade mat lo
+MIN_CONFIDENCE  = 50
 
-# Trailing Stop Loss
-TRAILING_STOP  = True
-TRAIL_TRIGGER  = 0.4
-TRAIL_OFFSET   = 0.3
+TRAILING_STOP   = True
+TRAIL_TRIGGER   = 0.4
+TRAIL_OFFSET    = 0.3
 
-# Periodic Update
-UPDATE_INTERVAL = 1800
-
-# Minimum score required — 6 out of 8
+UPDATE_INTERVAL  = 1800
 MIN_SCORE_POINTS = 6
 
 
@@ -125,39 +120,26 @@ def detect_structure(df, swing_bars=5):
 #  KEY LEVELS
 # ─────────────────────────────────────────────
 def detect_key_levels(df, current_price, lookback=100):
-    """
-    Important support/resistance levels detect karta hai:
-    1. Recent swing highs/lows
-    2. Round numbers (2300, 2400 etc)
-    3. FVG zones
-    """
     levels     = []
     recent     = df.tail(lookback)
     highs      = recent["high"].values
     lows       = recent["low"].values
     n          = len(highs)
     swing_bars = 5
-
-    # Swing highs aur lows
     for i in range(swing_bars, n - swing_bars):
         if highs[i] == max(highs[i - swing_bars: i + swing_bars + 1]):
             levels.append(highs[i])
         if lows[i] == min(lows[i - swing_bars: i + swing_bars + 1]):
             levels.append(lows[i])
-
-    # Round numbers
-    base  = round(current_price / 100) * 100
+    base = round(current_price / 100) * 100
     for r in range(-3, 4):
         levels.append(base + r * 100)
-
-    # Price kisi level ke paas hai — 0.3% ke andar
     near_level = False
     for level in levels:
         dist_pct = abs(current_price - level) / current_price * 100
         if dist_pct <= 0.3:
             near_level = True
             break
-
     return near_level, levels
 
 
@@ -169,11 +151,9 @@ def detect_fvg(df, lookback=50, min_gap_pct=0.05):
     recent        = df.tail(lookback).reset_index(drop=True)
     n             = len(recent)
     current_price = recent["close"].iloc[-1]
-
     for i in range(2, n):
         c1 = recent.iloc[i - 2]
         c3 = recent.iloc[i]
-
         if c1["high"] < c3["low"]:
             gap_bottom = c1["high"]
             gap_top    = c3["low"]
@@ -191,7 +171,6 @@ def detect_fvg(df, lookback=50, min_gap_pct=0.05):
                     "filled": (current_price <= gap_top and
                                current_price >= gap_bottom),
                 })
-
         elif c1["low"] > c3["high"]:
             gap_top    = c1["low"]
             gap_bottom = c3["high"]
@@ -218,12 +197,10 @@ def detect_fvg(df, lookback=50, min_gap_pct=0.05):
 def fvg_signal(fvgs, structure, current_price):
     if not fvgs:
         return 0.0, "No FVG found"
-
     bull_fvgs = [f for f in fvgs if f["type"] == "BULL"]
     bear_fvgs = [f for f in fvgs if f["type"] == "BEAR"]
     score     = 0.0
     reasons   = []
-
     if structure == "BULL" and bull_fvgs:
         fresh = [f for f in bull_fvgs if f["fresh"]]
         if fresh:
@@ -237,7 +214,6 @@ def fvg_signal(fvgs, structure, current_price):
         if unfilled:
             score += 0.2
             reasons.append(f"Unfilled Bull FVG support {unfilled[-1]['bottom']:.2f}-{unfilled[-1]['top']:.2f}")
-
     elif structure == "BEAR" and bear_fvgs:
         fresh = [f for f in bear_fvgs if f["fresh"]]
         if fresh:
@@ -253,41 +229,30 @@ def fvg_signal(fvgs, structure, current_price):
             reasons.append(f"Unfilled Bear FVG resistance {unfilled[-1]['bottom']:.2f}-{unfilled[-1]['top']:.2f}")
     else:
         reasons.append(f"Structure {structure} — no matching FVG")
-
     return float(np.clip(score, -1.0, 1.0)), " | ".join(reasons)
 
 
 # ─────────────────────────────────────────────
-#  SCORING SYSTEM — 8 Points
+#  SCORING SYSTEM
 # ─────────────────────────────────────────────
 def calculate_score(tf_results, current_price, weekly_structure):
-    """
-    8 point scoring system:
-    Weekly trend  → +3
-    Daily trend   → +2
-    4H structure  → +2
-    Key level     → +2
-    FVG confirm   → +1
-    """
-    points   = 0
-    reasons  = []
+    points    = 0
+    reasons   = []
     direction = None
 
-    # Weekly trend — sabse important (3 points)
     w_struct = tf_results.get("1w", {}).get("structure", "RANGE")
     if w_struct == "BULL":
-        points   += 3
-        direction = "BUY"
+        points    += 3
+        direction  = "BUY"
         reasons.append("Weekly BULL (+3)")
     elif w_struct == "BEAR":
-        points   += 3
-        direction = "SELL"
+        points    += 3
+        direction  = "SELL"
         reasons.append("Weekly BEAR (+3)")
     else:
         reasons.append("Weekly RANGE — weak (0)")
         return 0, "WAIT", reasons
 
-    # Daily trend — 2 points
     d_struct = tf_results.get("1d", {}).get("structure", "RANGE")
     if (direction == "BUY"  and d_struct == "BULL") or \
        (direction == "SELL" and d_struct == "BEAR"):
@@ -296,7 +261,6 @@ def calculate_score(tf_results, current_price, weekly_structure):
     else:
         reasons.append(f"Daily not confirming — {d_struct} (0)")
 
-    # 4H structure — 2 points
     h4_struct = tf_results.get("4h", {}).get("structure", "RANGE")
     if (direction == "BUY"  and h4_struct == "BULL") or \
        (direction == "SELL" and h4_struct == "BEAR"):
@@ -305,7 +269,6 @@ def calculate_score(tf_results, current_price, weekly_structure):
     else:
         reasons.append(f"4H not confirming — {h4_struct} (0)")
 
-    # FVG confirm — 1 point
     fvg_score = tf_results.get("1h", {}).get("fvg_score", 0)
     if (direction == "BUY"  and fvg_score > 0) or \
        (direction == "SELL" and fvg_score < 0):
@@ -326,12 +289,9 @@ def analyze_timeframe(exchange, symbol, tf):
         bars = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=200)
     except Exception as e:
         return {"score": 0.0, "reasons": [f"{tf}: fetch error"], "error": True}
-
     df = pd.DataFrame(bars, columns=["time", "open", "high", "low", "close", "volume"])
-
     if df.empty or len(df) < 60:
         return {"score": 0.0, "reasons": [f"{tf}: data kam"], "error": True}
-
     df["time"]    = pd.to_datetime(df["time"], unit="ms")
     structure     = detect_structure(df)
     fvgs          = detect_fvg(df, FVG_LOOKBACK, MIN_FVG_SIZE)
@@ -339,10 +299,7 @@ def analyze_timeframe(exchange, symbol, tf):
     score, reason = fvg_signal(fvgs, structure, current_price)
     bull_c        = len([f for f in fvgs if f["type"] == "BULL"])
     bear_c        = len([f for f in fvgs if f["type"] == "BEAR"])
-
-    # Key levels
     near_level, _ = detect_key_levels(df, current_price)
-
     return {
         "score":      score,
         "fvg_score":  score,
@@ -416,20 +373,26 @@ trade_state = {
 
 
 # ─────────────────────────────────────────────
-#  PERIODIC UPDATE
+#  PERIODIC UPDATE — FIXED
 # ─────────────────────────────────────────────
 def run_periodic_update():
     time.sleep(UPDATE_INTERVAL)
     while True:
         try:
-            now      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            position = trade_state["position"]
-            price    = trade_state["last_price"]
-            signal   = trade_state["last_signal"]
-            conf     = trade_state["last_conf"]
-            capital  = trade_state["capital"]
-            points   = trade_state["last_points"]
+            now          = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            position     = trade_state["position"]
+            price        = trade_state["last_price"]
+            signal       = trade_state["last_signal"]
+            conf         = trade_state["last_conf"]
+            capital      = trade_state["capital"]
+            points       = trade_state["last_points"]
 
+            # Price 0 hai to skip
+            if price == 0:
+                time.sleep(UPDATE_INTERVAL)
+                continue
+
+            # Trade open hai
             if position is not None:
                 entry        = trade_state["entry_price"]
                 sl           = trade_state["sl_price"]
@@ -464,6 +427,8 @@ def run_periodic_update():
                     f"Signal       : {signal} ({conf}%)\n"
                     f"Score        : {points}/8"
                 )
+
+            # Koi trade nahi
             else:
                 send_telegram(
                     f"--- MARKET UPDATE ---\n"
@@ -472,9 +437,10 @@ def run_periodic_update():
                     f"Signal  : {signal} ({conf}%)\n"
                     f"Score   : {points}/8\n"
                     f"Capital : {capital:.2f} USDT\n"
-                    f"Status  : Entry ka wait kar raha hum\n"
+                    f"Status  : Next entry ka wait...\n"
                     f"---------------------"
                 )
+
         except Exception as e:
             print(f"[UPDATE ERROR] {e}")
         time.sleep(UPDATE_INTERVAL)
@@ -485,36 +451,32 @@ def run_periodic_update():
 # ─────────────────────────────────────────────
 def run_decision_engine():
     exchange = get_exchange()
-    print("[DECISION] Engine v4.0 started")
+    print("[DECISION] Engine v4.1 started")
     while True:
         try:
-            scan_time  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            tf_results = {}
+            scan_time   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            tf_results  = {}
             all_reasons = []
 
-            # Har timeframe analyze karo
             for tf in TIMEFRAMES.keys():
                 result = analyze_timeframe(exchange, SYMBOL, tf)
                 tf_results[tf] = result
                 all_reasons.extend(result.get("reasons", []))
 
             current_price    = tf_results.get("1h", {}).get("price", 0)
-            weekly_structure = tf_results.get("1w",  {}).get("structure", "RANGE")
+            weekly_structure = tf_results.get("1w", {}).get("structure", "RANGE")
 
-            # 8 point scoring
             points, direction, score_reasons = calculate_score(
                 tf_results, current_price, weekly_structure
             )
             all_reasons.extend(score_reasons)
 
-            # Funding rate
             funding = get_funding_rate(exchange, SYMBOL)
             if funding > 0.0005:
-                all_reasons.append(f"Funding HIGH -> bearish pressure")
+                all_reasons.append("Funding HIGH -> bearish pressure")
             elif funding < -0.0005:
-                all_reasons.append(f"Funding NEGATIVE -> bullish pressure")
+                all_reasons.append("Funding NEGATIVE -> bullish pressure")
 
-            # Final signal — minimum 6/8 points chahiye
             confidence = int((points / 8) * 100)
 
             if points >= MIN_SCORE_POINTS and direction == "BUY":
@@ -526,7 +488,6 @@ def run_decision_engine():
 
             print(f"[DECISION] {scan_time} | Points={points}/8 | Conf={confidence}% | {signal}")
 
-            # Save output file
             with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
                 f.write(
                     f"SIGNAL:{signal}\n"
@@ -536,12 +497,10 @@ def run_decision_engine():
                     f"REASON:{' | '.join(all_reasons)}\n"
                 )
 
-            # Update shared state
             trade_state["last_signal"] = signal
             trade_state["last_conf"]   = confidence
             trade_state["last_points"] = points
 
-            # JSON log
             entry_log = {
                 "time":       scan_time,
                 "signal":     signal,
@@ -579,7 +538,6 @@ def run_execution_engine():
     tp_price     = 0.0
     capital_used = 0.0
 
-    # Pehla signal aane tak wait
     print("[EXECUTE] Waiting for first decision signal...")
     while True:
         try:
@@ -595,7 +553,7 @@ def run_execution_engine():
 
     print("[EXECUTE] Engine started")
     send_telegram(
-        f"TRADE BOT v4.0 STARTED\n"
+        f"TRADE BOT v4.1 STARTED\n"
         f"Capital  : {capital} USDT\n"
         f"Symbol   : {SYMBOL}\n"
         f"Mode     : Paper Trading\n"
@@ -764,7 +722,7 @@ def run_execution_engine():
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 55)
-    print("  TRADE BOT v4.0 STARTING...")
+    print("  TRADE BOT v4.1 STARTING...")
     print("  Edge: Weekly+Daily+4H+FVG+KeyLevels")
     print("=" * 55)
 
