@@ -1,9 +1,6 @@
 """
-TRADE BOT v6.0 — Main Entry Point
-New Features:
-1. Win Rate Tracker — daily report raat 11:59 PM
-2. Market Hours Filter — sirf London/NY session
-3. Dynamic SL/TP — ATR based
+TRADE BOT v6.1 — Main Entry Point
+New: TP Zone Early Exit (65-80% check)
 """
 
 import threading
@@ -14,7 +11,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Trade Bot Running! v6.0"
+    return "Trade Bot Running! v6.1"
 
 def run_server():
     app.run(host='0.0.0.0', port=8080)
@@ -53,7 +50,7 @@ MIN_FVG_SIZE     = 0.1
 
 BOT_TOKEN        = "8161773850:AAFcWw3UnlSe2TrMooB2uvgZQZUqIW0zW2w"
 CHAT_ID          = "7102976298"
-CAPITAL          = 105
+CAPITAL          = 105.26
 RISK_PERCENT     = 5
 LEVERAGE         = 5
 MIN_CONFIDENCE   = 50
@@ -69,49 +66,37 @@ MIN_SCORE_POINTS = 6
 
 # ATR Settings
 ATR_PERIOD       = 14
-ATR_SL_MULT      = 1.5    # SL = ATR * 1.5
-ATR_TP_MULT      = 1.5    # TP = ATR * 1.5 (1:1 RR)
+ATR_SL_MULT      = 1.5
+ATR_TP_MULT      = 3.0   # 1:2 RR
 
-# Market Hours (IST = UTC+5:30)
-TRADING_SESSIONS = [
-    (12, 30, 20, 30),   # London: 12:30 PM - 8:30 PM IST
-    (18, 30,  0, 30),   # New York: 6:30 PM - 12:30 AM IST
-]
+# TP Early Exit
+TP_EXIT_MIN_PCT   = 0.65  # 65% par check shuru
+TP_EXIT_MAX_PCT   = 0.80  # 80% tak check
+TP_HOLD_MIN_SCORE = 6     # 6/8 se kam = exit
 
-# Thread safety
+# Market Hours (IST)
 state_lock = threading.Lock()
 
 
 # ─────────────────────────────────────────────
-#  MARKET HOURS CHECK
+#  MARKET HOURS
 # ─────────────────────────────────────────────
 def is_trading_hours():
-    """
-    Sirf London aur NY session mein trade karo.
-    IST mein:
-      London  : 12:30 PM — 8:30 PM
-      New York: 6:30 PM  — 12:30 AM
-    """
-    ist   = timezone(timedelta(hours=5, minutes=30))
-    now   = datetime.now(ist)
-    h, m  = now.hour, now.minute
-    mins  = h * 60 + m
+    ist  = timezone(timedelta(hours=5, minutes=30))
+    now  = datetime.now(ist)
+    h, m = now.hour, now.minute
+    mins = h * 60 + m
 
-    # London session: 12:30 - 20:30
     london_start = 12 * 60 + 30
     london_end   = 20 * 60 + 30
-
-    # NY session: 18:30 - 24:30 (midnight cross)
-    ny_start = 18 * 60 + 30
-    ny_end   = 24 * 60 + 30
+    ny_start     = 18 * 60 + 30
 
     in_london = london_start <= mins <= london_end
-    in_ny     = mins >= ny_start or mins <= 30  # midnight cross
+    in_ny     = mins >= ny_start or mins <= 30
 
     return in_london or in_ny
 
 def next_session_time():
-    """Agla session kab shuru hoga"""
     ist  = timezone(timedelta(hours=5, minutes=30))
     now  = datetime.now(ist)
     h, m = now.hour, now.minute
@@ -126,23 +111,17 @@ def next_session_time():
 
 
 # ─────────────────────────────────────────────
-#  ATR CALCULATION
+#  ATR
 # ─────────────────────────────────────────────
 def calc_atr(df, period=14):
-    """
-    ATR = Average True Range
-    Market kitna volatile hai yeh batata hai
-    """
     high  = df["high"]
     low   = df["low"]
     close = df["close"]
-
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low  - close.shift(1)).abs()
-
-    tr  = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=period, adjust=False).mean()
+    tr1   = high - low
+    tr2   = (high - close.shift(1)).abs()
+    tr3   = (low  - close.shift(1)).abs()
+    tr    = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr   = tr.ewm(span=period, adjust=False).mean()
     return atr.iloc[-1]
 
 
@@ -168,10 +147,9 @@ def save_capital(capital):
 
 
 # ─────────────────────────────────────────────
-#  TRADE HISTORY — WIN RATE TRACKER
+#  TRADE HISTORY
 # ─────────────────────────────────────────────
 def save_trade_history(side, entry, exit_price, pnl, capital, duration, label):
-    """Har trade ko history mein save karta hai"""
     try:
         try:
             with open(TRADE_HISTORY, "r", encoding="utf-8") as f:
@@ -195,13 +173,11 @@ def save_trade_history(side, entry, exit_price, pnl, capital, duration, label):
 
         with open(TRADE_HISTORY, "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
-
     except Exception as e:
         print(f"[HISTORY ERROR] {e}")
 
 
 def get_daily_stats():
-    """Aaj ke trades ki stats nikalta hai"""
     try:
         with open(TRADE_HISTORY, "r", encoding="utf-8") as f:
             history = json.load(f)
@@ -214,9 +190,9 @@ def get_daily_stats():
     if not trades:
         return None
 
-    total   = len(trades)
-    wins    = len([t for t in trades if t["result"] == "WIN"])
-    losses  = total - wins
+    total    = len(trades)
+    wins     = len([t for t in trades if t["result"] == "WIN"])
+    losses   = total - wins
     win_rate = round((wins / total) * 100, 1) if total > 0 else 0
     daily_pnl = round(sum(t["pnl"] for t in trades), 2)
     best      = round(max(t["pnl"] for t in trades), 2)
@@ -236,7 +212,6 @@ def get_daily_stats():
 
 
 def get_overall_stats():
-    """Sabhi trades ki overall stats"""
     try:
         with open(TRADE_HISTORY, "r", encoding="utf-8") as f:
             history = json.load(f)
@@ -246,10 +221,10 @@ def get_overall_stats():
     if not history:
         return None
 
-    total    = len(history)
-    wins     = len([t for t in history if t["result"] == "WIN"])
-    losses   = total - wins
-    win_rate = round((wins / total) * 100, 1) if total > 0 else 0
+    total     = len(history)
+    wins      = len([t for t in history if t["result"] == "WIN"])
+    losses    = total - wins
+    win_rate  = round((wins / total) * 100, 1) if total > 0 else 0
     total_pnl = round(sum(t["pnl"] for t in history), 2)
     best      = round(max(t["pnl"] for t in history), 2)
     worst     = round(min(t["pnl"] for t in history), 2)
@@ -541,7 +516,7 @@ def get_funding_rate(exchange, symbol):
 # ─────────────────────────────────────────────
 #  SIGNAL READER
 # ─────────────────────────────────────────────
-def read_signal():
+def read_signal_with_atr():
     try:
         with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
             lines = f.read().splitlines()
@@ -555,9 +530,10 @@ def read_signal():
             int(data.get("CONFIDENCE", "0")),
             float(data.get("SCORE", "0")),
             data.get("REASON", ""),
+            float(data.get("ATR", "0")),
         )
     except:
-        return "WAIT", 0, 0.0, ""
+        return "WAIT", 0, 0.0, "", 0.0
 
 
 # ─────────────────────────────────────────────
@@ -585,6 +561,7 @@ trade_state = {
     "last_price":   0.0,
     "last_points":  0,
     "last_atr":     0.0,
+    "last_tp_zone": "",
 }
 
 def update_state(**kwargs):
@@ -617,6 +594,7 @@ def run_periodic_update():
                 psize        = trade_state["pos_size"]
                 etime        = trade_state["entry_time"]
                 capital_used = trade_state["capital_used"]
+                tp_zone      = trade_state["last_tp_zone"]
 
             if price == 0:
                 time.sleep(UPDATE_INTERVAL)
@@ -636,6 +614,8 @@ def run_periodic_update():
                     tp_dist = ((price - tp) / price) * 100
                     sl_dist = ((sl - price) / price) * 100
 
+                tp_zone_line = f"\nTP Zone      : {tp_zone}" if tp_zone else ""
+
                 send_telegram(
                     f"--- TRADE UPDATE ---\n"
                     f"Time         : {now}\n"
@@ -650,6 +630,7 @@ def run_periodic_update():
                     f"TP           : {tp:.2f} ({tp_dist:.2f}% door)\n"
                     f"SL           : {sl:.2f} ({sl_dist:.2f}% door)\n"
                     f"Score        : {points}/8"
+                    f"{tp_zone_line}"
                 )
             else:
                 session_status = "Active" if trading else f"Band — Next: {next_session_time()}"
@@ -670,19 +651,17 @@ def run_periodic_update():
 
 
 # ─────────────────────────────────────────────
-#  DAILY REPORT — Raat 11:59 PM
+#  DAILY REPORT
 # ─────────────────────────────────────────────
 def run_daily_report():
-    """Roz raat 11:59 PM par daily report bhejta hai"""
     while True:
         try:
             ist  = timezone(timedelta(hours=5, minutes=30))
             now  = datetime.now(ist)
             h, m = now.hour, now.minute
 
-            # 11:59 PM par report bhejo
             if h == 23 and m == 59:
-                daily  = get_daily_stats()
+                daily   = get_daily_stats()
                 overall = get_overall_stats()
 
                 if daily:
@@ -711,11 +690,10 @@ def run_daily_report():
                         f"Aaj koi trade nahi hua\n"
                         f"--------------------"
                     )
-                time.sleep(70)  # 1 min wait — dobara trigger nahi ho
+                time.sleep(70)
 
         except Exception as e:
             print(f"[DAILY REPORT ERROR] {e}")
-
         time.sleep(30)
 
 
@@ -724,7 +702,7 @@ def run_daily_report():
 # ─────────────────────────────────────────────
 def run_decision_engine():
     exchange = get_exchange()
-    print("[DECISION] Engine v6.0 started")
+    print("[DECISION] Engine v6.1 started")
 
     while True:
         try:
@@ -808,29 +786,6 @@ def run_decision_engine():
 
 
 # ─────────────────────────────────────────────
-#  SIGNAL READER — ATR bhi padhta hai
-# ─────────────────────────────────────────────
-def read_signal_with_atr():
-    try:
-        with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
-            lines = f.read().splitlines()
-        data = {}
-        for line in lines:
-            if ":" in line:
-                key, val = line.split(":", 1)
-                data[key.strip()] = val.strip()
-        return (
-            data.get("SIGNAL", "WAIT"),
-            int(data.get("CONFIDENCE", "0")),
-            float(data.get("SCORE", "0")),
-            data.get("REASON", ""),
-            float(data.get("ATR", "0")),
-        )
-    except:
-        return "WAIT", 0, 0.0, "", 0.0
-
-
-# ─────────────────────────────────────────────
 #  EXECUTION ENGINE
 # ─────────────────────────────────────────────
 def run_execution_engine():
@@ -860,14 +815,15 @@ def run_execution_engine():
 
     print("[EXECUTE] Engine started")
     send_telegram(
-        f"TRADE BOT v6.0 STARTED\n"
+        f"TRADE BOT v6.1 STARTED\n"
         f"Capital  : {capital:.2f} USDT\n"
         f"Symbol   : {SYMBOL}\n"
         f"Mode     : Paper Trading\n"
         f"Edge     : Weekly+Daily+4H+FVG+ATR\n"
         f"Min Score: {MIN_SCORE_POINTS}/8\n"
         f"Cooldown : {COOLDOWN//60} min\n"
-        f"Sessions : London + NY only"
+        f"Sessions : London + NY only\n"
+        f"TP Zone  : {int(TP_EXIT_MIN_PCT*100)}-{int(TP_EXIT_MAX_PCT*100)}% early exit"
     )
 
     while True:
@@ -889,7 +845,61 @@ def run_execution_engine():
                 capital_used=capital_used,
             )
 
-            # Trailing SL
+            # ── TP Zone Check — 65% to 80% ──────
+            if position is not None:
+                if position == "BUY":
+                    tp_progress = (current_price - entry_price) / (tp_price - entry_price) \
+                                  if tp_price != entry_price else 0
+                else:
+                    tp_progress = (entry_price - current_price) / (entry_price - tp_price) \
+                                  if tp_price != entry_price else 0
+
+                if TP_EXIT_MIN_PCT <= tp_progress <= TP_EXIT_MAX_PCT:
+                    points = get_state("last_points")
+                    if points < TP_HOLD_MIN_SCORE:
+                        # Signal weak — early exit
+                        pnl      = calc_pnl(position, entry_price, current_price, pos_size)
+                        capital += pnl
+                        duration = str(datetime.now() - entry_time).split(".")[0]
+                        save_capital(capital)
+                        save_trade_history(
+                            position, entry_price, current_price,
+                            pnl, capital, duration, "Early Exit — Signal Weak"
+                        )
+                        print(f"[EARLY EXIT] TP {tp_progress*100:.0f}% | Score={points}/8 weak | PnL={pnl:+.2f}")
+                        update_state(
+                            last_tp_zone=f"TP {tp_progress*100:.0f}% par exit | Score={points}/8 | PnL={pnl:+.2f} USDT",
+                        )
+                        send_telegram(
+                            f"EARLY EXIT — Signal Weak\n"
+                            f"Side     : {position}\n"
+                            f"Entry    : {entry_price:.2f}\n"
+                            f"Exit     : {current_price:.2f}\n"
+                            f"PnL      : {pnl:+.2f} USDT\n"
+                            f"TP Zone  : {tp_progress*100:.0f}% reached\n"
+                            f"Score    : {points}/8 — weak signal"
+                        )
+                        position     = None
+                        entry_price  = 0.0
+                        entry_time   = None
+                        pos_size     = 0.0
+                        sl_price     = 0.0
+                        tp_price     = 0.0
+                        capital_used = 0.0
+                        cooldown_end = time.time() + COOLDOWN
+                        update_state(position=None, capital_used=0.0, capital=capital)
+                        time.sleep(EXECUTE_SCAN)
+                        continue
+                    else:
+                        # Signal strong — wait karo
+                        update_state(
+                            last_tp_zone=f"TP {tp_progress*100:.0f}% zone | Score={points}/8 strong — TP ka wait",
+                        )
+                        print(f"[TP ZONE] {tp_progress*100:.0f}% | Score={points}/8 strong — waiting")
+                else:
+                    update_state(last_tp_zone="")
+
+            # ── Trailing SL ──────────────────────
             if position is not None and TRAILING_STOP:
                 if position == "BUY":
                     profit_pct = ((current_price - entry_price) / entry_price) * 100
@@ -908,7 +918,7 @@ def run_execution_engine():
                             update_state(sl_price=sl_price)
                             print(f"[TRAIL] SELL SL -> {sl_price:.2f}")
 
-            # SL/TP check
+            # ── SL/TP Check ──────────────────────
             if position is not None:
                 hit_sl = (position == "BUY"  and current_price <= sl_price) or \
                          (position == "SELL" and current_price >= sl_price)
@@ -921,13 +931,10 @@ def run_execution_engine():
                     capital += pnl
                     duration = str(datetime.now() - entry_time).split(".")[0]
                     save_capital(capital)
-
-                    # Win rate tracker mein save karo
                     save_trade_history(
                         position, entry_price, current_price,
                         pnl, capital, duration, label
                     )
-
                     print(f"[EXECUTE] {label} | {position} | PnL={pnl:+.2f} | Capital={capital:.2f}")
                     send_telegram(
                         f"TRADE CLOSED — {label}\n"
@@ -939,7 +946,6 @@ def run_execution_engine():
                         f"Capital      : {capital:.2f} USDT\n"
                         f"Time         : {duration}"
                     )
-
                     position     = None
                     entry_price  = 0.0
                     entry_time   = None
@@ -948,30 +954,32 @@ def run_execution_engine():
                     tp_price     = 0.0
                     capital_used = 0.0
                     cooldown_end = time.time() + COOLDOWN
-
-                    update_state(position=None, capital_used=0.0, capital=capital)
+                    update_state(
+                        position=None,
+                        capital_used=0.0,
+                        capital=capital,
+                        last_tp_zone="",
+                    )
                     print(f"[COOLDOWN] {COOLDOWN//60} min wait...")
                     time.sleep(EXECUTE_SCAN)
                     continue
 
-            # Cooldown check
+            # ── Cooldown Check ───────────────────
             if cooldown_end is not None and time.time() < cooldown_end:
                 remaining = int((cooldown_end - time.time()) / 60)
                 print(f"[{now}] Cooldown — {remaining} min baaki")
                 time.sleep(EXECUTE_SCAN)
                 continue
 
-            # Market hours check
+            # ── Market Hours Check ───────────────
             if not is_trading_hours():
                 print(f"[{now}] Session band — {next_session_time()} tak wait")
                 time.sleep(60)
                 continue
 
-            # Entry check
+            # ── Entry Check ──────────────────────
             if position is None:
                 if signal in ["BUY", "SELL"] and confidence >= MIN_CONFIDENCE:
-
-                    # ATR based SL/TP
                     if atr > 0:
                         sl_dist = atr * ATR_SL_MULT
                         tp_dist = atr * ATR_TP_MULT
@@ -979,7 +987,7 @@ def run_execution_engine():
                         tp_pct  = (tp_dist / current_price) * 100
                     else:
                         sl_pct = 0.8
-                        tp_pct = 0.8
+                        tp_pct = 1.6
 
                     risk_amount  = capital * (RISK_PERCENT / 100)
                     capital_used = risk_amount * LEVERAGE
@@ -1014,21 +1022,18 @@ def run_execution_engine():
                 else:
                     print(f"[{now}] Price={current_price:.2f} | WAIT | Score={int(score)}/8")
 
-            # Hold / Flip
+            # ── Hold / Flip ───────────────────────
             else:
                 if (position == "BUY"  and signal == "SELL" and confidence >= MIN_CONFIDENCE) or \
                    (position == "SELL" and signal == "BUY"  and confidence >= MIN_CONFIDENCE):
-
                     pnl      = calc_pnl(position, entry_price, current_price, pos_size)
                     capital += pnl
                     duration = str(datetime.now() - entry_time).split(".")[0]
                     save_capital(capital)
-
                     save_trade_history(
                         position, entry_price, current_price,
                         pnl, capital, duration, "Signal Flip"
                     )
-
                     send_telegram(
                         f"TRADE CLOSED — Signal Flip\n"
                         f"Side         : {position}\n"
@@ -1039,7 +1044,6 @@ def run_execution_engine():
                         f"Capital      : {capital:.2f} USDT\n"
                         f"Time         : {duration}"
                     )
-
                     position     = None
                     entry_price  = 0.0
                     entry_time   = None
@@ -1048,10 +1052,13 @@ def run_execution_engine():
                     tp_price     = 0.0
                     capital_used = 0.0
                     cooldown_end = time.time() + COOLDOWN
-
-                    update_state(position=None, capital_used=0.0, capital=capital)
+                    update_state(
+                        position=None,
+                        capital_used=0.0,
+                        capital=capital,
+                        last_tp_zone="",
+                    )
                     print(f"[COOLDOWN] Signal flip — {COOLDOWN//60} min wait...")
-
                 else:
                     pnl_now = calc_pnl(position, entry_price, current_price, pos_size)
                     print(f"[{now}] Price={current_price:.2f} | Holding {position} | PnL={pnl_now:+.2f} USDT")
@@ -1069,8 +1076,8 @@ def run_execution_engine():
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 55)
-    print("  TRADE BOT v6.0 STARTING...")
-    print("  New: Win Tracker + Hours + ATR SL/TP")
+    print("  TRADE BOT v6.1 STARTING...")
+    print("  New: TP Zone Early Exit (65-80%)")
     print("=" * 55)
 
     t1 = threading.Thread(target=run_server)
@@ -1099,6 +1106,7 @@ if __name__ == "__main__":
     print("[INFO] Execute     : har 10s")
     print("[INFO] Updates     : har 30 min")
     print("[INFO] Daily Report: raat 11:59 PM")
+    print("[INFO] TP Zone     : 65-80% early exit")
 
     while True:
         time.sleep(60)
