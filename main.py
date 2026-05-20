@@ -53,7 +53,7 @@ MIN_FVG_SIZE     = 0.1
 
 BOT_TOKEN        = "8161773850:AAFcWw3UnlSe2TrMooB2uvgZQZUqIW0zW2w"
 CHAT_ID          = "7102976298"
-CAPITAL          = 10000
+CAPITAL          = 105
 RISK_PERCENT     = 5
 LEVERAGE         = 5
 MIN_CONFIDENCE   = 50
