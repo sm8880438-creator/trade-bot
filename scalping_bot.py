@@ -37,7 +37,7 @@ CHAT_ID          = "7102976298"
 CAPITAL          = 100       # 100 USDT
 RISK_PERCENT     = 10        # 10% per trade
 LEVERAGE         = 10        # 10x leverage
-MIN_CONFIDENCE   = 55        # minimum confidence
+MIN_CONFIDENCE   = 40       # minimum confidence
 EXECUTE_SCAN     = 2         # har 2 sec price check
 DECISION_SCAN    = 30        # har 30 sec signal scan
 COOLDOWN         = 60        # 1 min cooldown
@@ -53,7 +53,7 @@ TP_EXIT_MIN_PCT   = 0.65
 TP_EXIT_MAX_PCT   = 0.80
 TP_HOLD_MIN_SCORE = 5
 
-MIN_SCORE_POINTS  = 5        # 5/8 kaafi hai scalping mein
+MIN_SCORE_POINTS  = 3       # 5/8 kaafi hai scalping mein
 UPDATE_INTERVAL   = 1800
 
 OUTPUT_FILE      = "scalping_output.txt"
@@ -861,11 +861,11 @@ def run_execution_engine():
                 time.sleep(EXECUTE_SCAN)
                 continue
 
-            # Market hours
-            if not is_trading_hours():
-                print(f"[{now}] Session band")
-                time.sleep(60)
-                continue
+            # Market hours — temporarily off for testing
+# if not is_trading_hours():
+#     print(f"[{now}] Session band")
+#     time.sleep(60)
+#     continue
 
             # Entry
             if position is None:
