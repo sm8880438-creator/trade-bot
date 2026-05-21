@@ -51,7 +51,7 @@ MIN_FVG_SIZE     = 0.1
 BOT_TOKEN        = "8161773850:AAFcWw3UnlSe2TrMooB2uvgZQZUqIW0zW2w"
 CHAT_ID          = "7102976298"
 CAPITAL          = 105.26
-RISK_PERCENT     = 5
+RISK_PERCENT     = 16
 LEVERAGE         = 5
 MIN_CONFIDENCE   = 50
 EXECUTE_SCAN     = 10
@@ -82,6 +82,11 @@ state_lock = threading.Lock()
 #  MARKET HOURS
 # ─────────────────────────────────────────────
 def is_trading_hours():
+    """
+    London/NY  → hamesha trade (6/8 score kaafi)
+    Asian      → sirf 7/8 score par trade
+    Returns: (can_trade, min_score_required)
+    """
     ist  = timezone(timedelta(hours=5, minutes=30))
     now  = datetime.now(ist)
     h, m = now.hour, now.minute
@@ -94,7 +99,10 @@ def is_trading_hours():
     in_london = london_start <= mins <= london_end
     in_ny     = mins >= ny_start or mins <= 30
 
-    return in_london or in_ny
+    if in_london or in_ny:
+        return True, 6     # London/NY — normal score
+    else:
+        return True, 7     # Asian — strict score
 
 def next_session_time():
     ist  = timezone(timedelta(hours=5, minutes=30))
@@ -971,15 +979,19 @@ def run_execution_engine():
                 time.sleep(EXECUTE_SCAN)
                 continue
 
-            # ── Market Hours Check ───────────────
-            if not is_trading_hours():
-                print(f"[{now}] Session band — {next_session_time()} tak wait")
+            # Market Hours Check
+            can_trade, session_min_score = is_trading_hours()
+            if not can_trade:
+                print(f"[{now}] Session band")
                 time.sleep(60)
                 continue
 
-            # ── Entry Check ──────────────────────
+            # Asian session mein higher score chahiye
+            required_score = session_min_score
+
+          # Entry check
             if position is None:
-                if signal in ["BUY", "SELL"] and confidence >= MIN_CONFIDENCE:
+                if signal in ["BUY", "SELL"] and confidence >= MIN_CONFIDENCE and int(score) >= required_score:
                     if atr > 0:
                         sl_dist = atr * ATR_SL_MULT
                         tp_dist = atr * ATR_TP_MULT
