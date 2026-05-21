@@ -38,8 +38,8 @@ CAPITAL          = 100       # 100 USDT
 RISK_PERCENT     = 10        # 10% per trade
 LEVERAGE         = 10        # 10x leverage
 MIN_CONFIDENCE   = 40       # minimum confidence
-EXECUTE_SCAN     = 2         # har 2 sec price check
-DECISION_SCAN    = 30        # har 30 sec signal scan
+EXECUTE_SCAN     = 8        # har 2 sec price check
+DECISION_SCAN    = 60        # har 30 sec signal scan
 COOLDOWN         = 60        # 1 min cooldown
 MAX_HOLD_MINUTES = 5         # max 5 min hold
 
@@ -150,7 +150,13 @@ def save_trade_history(side, entry, exit_price, pnl, capital, duration, label):
         with open(TRADE_HISTORY, "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
     except Exception as e:
-        print(f"[HISTORY ERROR] {e}")
+            print(f"[EXECUTE ERROR] {e}")
+            if "429" in str(e) or "Too Many" in str(e):
+                print("[RATE LIMIT] 60 sec wait...")
+                time.sleep(60)
+            else:
+                send_telegram(f"SCALP EXECUTE ERROR!\n{str(e)[:200]}")
+                time.sleep(30)
 
 
 def get_daily_stats():
