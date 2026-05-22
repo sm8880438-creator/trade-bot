@@ -53,7 +53,7 @@ TP_EXIT_MIN_PCT   = 0.65
 TP_EXIT_MAX_PCT   = 0.80
 TP_HOLD_MIN_SCORE = 5
 
-MIN_SCORE_POINTS  = 3       # 5/8 kaafi hai scalping mein
+MIN_SCORE_POINTS  = 5       # 5/8 kaafi hai scalping mein
 UPDATE_INTERVAL   = 1800
 
 OUTPUT_FILE      = "scalping_output.txt"
