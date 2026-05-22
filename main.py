@@ -38,7 +38,7 @@ TIMEFRAMES = {
     "1h":  0.20,
 }
 
-DECISION_SCAN    = 300
+DECISION_SCAN    = 60
 OUTPUT_FILE      = "decision_output.txt"
 LOG_FILE         = "decision_log.json"
 CAPITAL_FILE     = "capital.txt"
@@ -62,7 +62,7 @@ TRAIL_OFFSET     = 0.3
 
 UPDATE_INTERVAL  = 1800
 COOLDOWN         = 900
-MIN_SCORE_POINTS = 6
+MIN_SCORE_POINTS = 7
 
 # ATR Settings
 ATR_PERIOD       = 14
@@ -333,7 +333,7 @@ def detect_key_levels(df, current_price, lookback=100):
 # ─────────────────────────────────────────────
 #  FVG DETECTION
 # ─────────────────────────────────────────────
-def detect_fvg(df, lookback=50, min_gap_pct=0.1):
+def detect_fvg(df, lookback=50, min_gap_pct=0.3):
     fvgs          = []
     recent        = df.tail(lookback).reset_index(drop=True)
     n             = len(recent)
@@ -463,6 +463,14 @@ def calculate_score(tf_results, current_price, weekly_structure):
         reasons.append(f"FVG confirms {direction} (+1)")
     else:
         reasons.append("FVG not confirming (0)")
+        # 1h structure confirm (1 point) — score 9 ho jayega
+    h1_struct = tf_results.get("1h", {}).get("structure", "RANGE")
+    if (direction == "BUY"  and h1_struct == "BULL") or \
+       (direction == "SELL" and h1_struct == "BEAR"):
+        points  += 1
+        reasons.append(f"1h confirms {direction} (+1)")
+    else:
+        reasons.append(f"1h not confirming — {h1_struct} (0)")
 
     reasons.append(f"Total: {points}/8")
     return points, direction, reasons
