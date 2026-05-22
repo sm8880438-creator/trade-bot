@@ -1,22 +1,38 @@
 """
-SCALPING BOT v3.0 — Perfect Edition
+SCALPING BOT v3.0 — Fixed Edition
 Strategy  : Smart Money (OB + Liquidity + FVG)
 Sessions  : 24/7
 Min Score : 6/8
-Capital   : 90% per trade
+Capital   : 90% per trade  [intentionally kept as-is]
 TP Zone   : 70-90% early exit
 Max Hold  : 3 min
 """
 
 import threading
 import time
+import os
+from queue import Queue, Empty
 from flask import Flask
+from dotenv import load_dotenv
+
+# ─────────────────────────────────────────────
+#  FIX #1 — .env se API keys load karo
+# ─────────────────────────────────────────────
+load_dotenv()
+
+API_KEY    = os.getenv("BINANCE_API_KEY", "")
+API_SECRET = os.getenv("BINANCE_SECRET", "")
+BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "8161773850:AAFcWw3UnlSe2TrMooB2uvgZQZUqIW0zW2w")
+CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "7102976298")
+
+if not all([API_KEY, API_SECRET, BOT_TOKEN, CHAT_ID]):
+    print("[WARN] .env mein kuch keys missing hain — check karo!")
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Scalping Bot v3.0 Running!"
+    return "Scalping Bot v3.0 Fixed Running!"
 
 def run_server():
     app.run(host='0.0.0.0', port=8081)
@@ -27,46 +43,56 @@ import pandas as pd
 import numpy as np
 import json
 import requests
+import shutil
 from datetime import datetime, timezone, timedelta
 
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
 SYMBOL           = "ETH/USDT:USDT"
-API_KEY          = ""
-API_SECRET       = ""
-
-BOT_TOKEN        = "8161773850:AAFcWw3UnlSe2TrMooB2uvgZQZUqIW0zW2w"
-CHAT_ID          = "7102976298"
 
 CAPITAL          = 100.0
-CAPITAL_USE_PCT  = 90        # 90% capital use
+CAPITAL_USE_PCT  = 90
 LEVERAGE         = 10
-MIN_SCORE        = 6         # 6/8 se upar trade
+MIN_SCORE        = 6
 MIN_CONFIDENCE   = int((MIN_SCORE / 8) * 100)
 
-EXECUTE_SCAN     = 8         # har 8 sec price check
-DECISION_SCAN    = 60        # har 60 sec signal scan
-COOLDOWN         = 60        # 60 sec cooldown
-MAX_HOLD_SECONDS = 180       # 3 min max hold
+MAX_DAILY_LOSS_PCT = 5.0
+
+EXECUTE_SCAN     = 8
+DECISION_SCAN    = 60
+COOLDOWN         = 60
+MAX_HOLD_SECONDS = 180
 
 ATR_PERIOD       = 7
 ATR_SL_MULT      = 1.5
-ATR_TP_MULT      = 1.5       # 1:1 RR — fast exit
+ATR_TP_MULT      = 1.5
 
-# TP Early Exit
-TP_EXIT_MIN_PCT   = 0.70     # 70%
-TP_EXIT_MAX_PCT   = 0.90     # 90%
-TP_HOLD_MIN_SCORE = 7        # 7/8+ = hold, else exit
+TP_EXIT_MIN_PCT   = 0.70
+TP_EXIT_MAX_PCT   = 0.90
+TP_HOLD_MIN_SCORE = 7
 
-UPDATE_INTERVAL  = 1800      # 30 min update
+UPDATE_INTERVAL  = 1800
 
-OUTPUT_FILE      = "scalping_output.txt"
-LOG_FILE         = "scalping_log.json"
-CAPITAL_FILE     = "scalping_capital.txt"
-TRADE_HISTORY    = "scalping_history.json"
+signal_queue = Queue(maxsize=1)
 
-state_lock = threading.Lock()
+LOG_FILE       = "scalping_log.json"
+CAPITAL_FILE   = "scalping_capital.txt"
+TRADE_HISTORY  = "scalping_history.json"
+
+state_lock   = threading.Lock()
+error_counts = {}
+
+
+# ─────────────────────────────────────────────
+#  ERROR TRACKING
+# ─────────────────────────────────────────────
+def track_error(source: str, e: Exception):
+    error_counts[source] = error_counts.get(source, 0) + 1
+    count = error_counts[source]
+    print(f"[{source} ERROR] ({count}) {type(e).__name__}: {e}")
+    if count == 10:
+        send_telegram(f"WARNING: {source} mein 10+ errors!\n{type(e).__name__}: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -75,19 +101,50 @@ state_lock = threading.Lock()
 def load_capital():
     try:
         with open(CAPITAL_FILE, "r") as f:
-            cap = float(f.read().strip())
+            data = json.load(f)
+            cap = float(data["capital"])
             print(f"[CAPITAL] Loaded: {cap} USDT")
             return cap
-    except:
-        print(f"[CAPITAL] Default {CAPITAL} USDT")
-        return CAPITAL
+    except Exception:
+        try:
+            with open(CAPITAL_FILE, "r") as f:
+                cap = float(f.read().strip())
+                print(f"[CAPITAL] Loaded (legacy): {cap} USDT")
+                return cap
+        except Exception:
+            print(f"[CAPITAL] Default {CAPITAL} USDT")
+            return CAPITAL
 
 def save_capital(capital):
+    tmp = CAPITAL_FILE + ".tmp"
     try:
-        with open(CAPITAL_FILE, "w") as f:
-            f.write(str(round(capital, 6)))
+        with open(tmp, "w") as f:
+            json.dump({
+                "capital":   round(capital, 6),
+                "timestamp": datetime.now().isoformat(),
+                "backup":    True,
+            }, f)
+        shutil.move(tmp, CAPITAL_FILE)
     except Exception as e:
-        print(f"[CAPITAL ERROR] {e}")
+        print(f"[CAPITAL SAVE ERROR] {e}")
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────
+#  DAILY LOSS CHECK
+# ─────────────────────────────────────────────
+def get_daily_pnl():
+    try:
+        with open(TRADE_HISTORY, "r", encoding="utf-8") as f:
+            history = json.load(f)
+        today  = datetime.now().strftime("%d/%m/%Y")
+        trades = [t for t in history if t["date"] == today]
+        return sum(t["pnl"] for t in trades)
+    except Exception:
+        return 0.0
 
 
 # ─────────────────────────────────────────────
@@ -99,7 +156,7 @@ def save_trade_history(side, entry, exit_price, pnl,
         try:
             with open(TRADE_HISTORY, "r", encoding="utf-8") as f:
                 history = json.load(f)
-        except:
+        except Exception:
             history = []
         history.append({
             "date":     datetime.now().strftime("%d/%m/%Y"),
@@ -123,7 +180,7 @@ def get_daily_stats():
     try:
         with open(TRADE_HISTORY, "r", encoding="utf-8") as f:
             history = json.load(f)
-    except:
+    except Exception:
         return None
     today  = datetime.now().strftime("%d/%m/%Y")
     trades = [t for t in history if t["date"] == today]
@@ -134,12 +191,11 @@ def get_daily_stats():
     losses    = total - wins
     win_rate  = round((wins / total) * 100, 1) if total > 0 else 0
     daily_pnl = round(sum(t["pnl"] for t in trades), 4)
-    best      = round(max(t["pnl"] for t in trades), 4)
-    worst     = round(min(t["pnl"] for t in trades), 4)
     return {
         "total": total, "wins": wins, "losses": losses,
         "win_rate": win_rate, "pnl": daily_pnl,
-        "best": best, "worst": worst,
+        "best":  round(max(t["pnl"] for t in trades), 4),
+        "worst": round(min(t["pnl"] for t in trades), 4),
         "capital": trades[-1]["capital"],
     }
 
@@ -148,7 +204,7 @@ def get_overall_stats():
     try:
         with open(TRADE_HISTORY, "r", encoding="utf-8") as f:
             history = json.load(f)
-    except:
+    except Exception:
         return None
     if not history:
         return None
@@ -167,14 +223,14 @@ def get_overall_stats():
 
 
 # ─────────────────────────────────────────────
-#  EXCHANGE — Rate Limit Safe
+#  EXCHANGE
 # ─────────────────────────────────────────────
 def get_exchange():
     ex = ccxt.binanceusdm({
         "apiKey":          API_KEY,
         "secret":          API_SECRET,
         "enableRateLimit": True,
-        "rateLimit":       100,      # 100ms between requests
+        "rateLimit":       100,
     })
     ex.load_markets()
     print("[INFO] Binance USDT-M Futures connected")
@@ -182,7 +238,6 @@ def get_exchange():
 
 
 def safe_fetch_ticker(ex, symbol, retries=3):
-    """Rate limit safe price fetch"""
     for i in range(retries):
         try:
             ticker = ex.fetch_ticker(symbol)
@@ -199,7 +254,6 @@ def safe_fetch_ticker(ex, symbol, retries=3):
 
 
 def safe_fetch_ohlcv(ex, symbol, tf, limit, retries=3):
-    """Rate limit safe OHLCV fetch"""
     for i in range(retries):
         try:
             bars = ex.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
@@ -225,7 +279,7 @@ def send_telegram(message):
             r = requests.post(
                 url,
                 data={"chat_id": CHAT_ID, "text": f"[SCALP] {message}"},
-                timeout=15
+                timeout=15,
             )
             if r.status_code == 200:
                 return
@@ -248,7 +302,8 @@ def calc_atr(df, period=7):
         tr3   = (low  - close.shift(1)).abs()
         tr    = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         return float(tr.ewm(span=period, adjust=False).mean().iloc[-1])
-    except:
+    except Exception as e:
+        track_error("calc_atr", e)
         return 0.0
 
 
@@ -275,12 +330,13 @@ def detect_structure(df, swing_bars=2):
         if hh and hl:   return "BULL"
         elif lh and ll: return "BEAR"
         return "RANGE"
-    except:
+    except Exception as e:
+        track_error("detect_structure", e)
         return "RANGE"
 
 
 # ─────────────────────────────────────────────
-#  ORDER BLOCKS — Improved
+#  ORDER BLOCKS — FIX #4
 # ─────────────────────────────────────────────
 def detect_order_blocks(df, lookback=40):
     try:
@@ -306,13 +362,21 @@ def detect_order_blocks(df, lookback=40):
                     next_body > curr_body * 1.2):
                 ob_top    = curr["high"]
                 ob_bottom = curr["open"]
-                tolerance = (ob_top - ob_bottom) * 0.3
-                in_zone   = (ob_bottom - tolerance <= current_price <= ob_top + tolerance)
+                tolerance = (ob_top - ob_bottom) * 0.15
+                in_zone   = (ob_bottom - tolerance <= current_price
+                             <= ob_top + tolerance)
+                candles_after = recent.iloc[i + 2:]
+                mitigated = any(
+                    (row["close"] >= ob_bottom and row["close"] <= ob_top)
+                    for _, row in candles_after.iterrows()
+                ) if len(candles_after) > 0 else False
                 bearish_obs.append({
                     "top":         round(ob_top, 4),
                     "bottom":      round(ob_bottom, 4),
-                    "price_in_ob": in_zone,
+                    "price_in_ob": in_zone and not mitigated,
                     "fresh":       (i >= n - 10),
+                    "mitigated":   mitigated,
+                    "strength":    round(next_body / curr_body, 2),
                     "idx":         i,
                 })
 
@@ -322,13 +386,21 @@ def detect_order_blocks(df, lookback=40):
                     next_body > curr_body * 1.2):
                 ob_top    = curr["open"]
                 ob_bottom = curr["low"]
-                tolerance = (ob_top - ob_bottom) * 0.3
-                in_zone   = (ob_bottom - tolerance <= current_price <= ob_top + tolerance)
+                tolerance = (ob_top - ob_bottom) * 0.15
+                in_zone   = (ob_bottom - tolerance <= current_price
+                             <= ob_top + tolerance)
+                candles_after = recent.iloc[i + 2:]
+                mitigated = any(
+                    (row["close"] >= ob_bottom and row["close"] <= ob_top)
+                    for _, row in candles_after.iterrows()
+                ) if len(candles_after) > 0 else False
                 bullish_obs.append({
                     "top":         round(ob_top, 4),
                     "bottom":      round(ob_bottom, 4),
-                    "price_in_ob": in_zone,
+                    "price_in_ob": in_zone and not mitigated,
                     "fresh":       (i >= n - 10),
+                    "mitigated":   mitigated,
+                    "strength":    round(next_body / curr_body, 2),
                     "idx":         i,
                 })
 
@@ -336,12 +408,13 @@ def detect_order_blocks(df, lookback=40):
             "bullish_obs": bullish_obs[-5:],
             "bearish_obs": bearish_obs[-5:],
         }
-    except:
+    except Exception as e:
+        track_error("detect_order_blocks", e)
         return {"bullish_obs": [], "bearish_obs": []}
 
 
 # ─────────────────────────────────────────────
-#  LIQUIDITY — Improved
+#  LIQUIDITY — FIX #5
 # ─────────────────────────────────────────────
 def detect_liquidity(df, lookback=40):
     try:
@@ -360,32 +433,40 @@ def detect_liquidity(df, lookback=40):
             if lows[i] == min(lows[i - swing_bars: i + swing_bars + 1]):
                 sell_liq.append(lows[i])
 
+        avg_volume = df["volume"].tail(20).mean()
         buy_swept  = False
         sell_swept = False
 
         if buy_liq:
-            last_high = buy_liq[-1]
-            recent_5  = df.tail(5)
-            tolerance = last_high * 0.002
-            if (any(recent_5["high"] > last_high - tolerance) and
-                    current_price < last_high + tolerance):
-                buy_swept = True
+            last_high    = buy_liq[-1]
+            recent_5     = df.tail(5)
+            tolerance    = last_high * 0.002
+            sweep_candle = recent_5[recent_5["high"] > last_high - tolerance]
+            if not sweep_candle.empty:
+                sweep_vol = sweep_candle["volume"].max()
+                if (sweep_vol > avg_volume * 1.5 and
+                        current_price < last_high * 1.003):
+                    buy_swept = True
 
         if sell_liq:
-            last_low  = sell_liq[-1]
-            recent_5  = df.tail(5)
-            tolerance = last_low * 0.002
-            if (any(recent_5["low"] < last_low + tolerance) and
-                    current_price > last_low - tolerance):
-                sell_swept = True
+            last_low     = sell_liq[-1]
+            recent_5     = df.tail(5)
+            tolerance    = last_low * 0.002
+            sweep_candle = recent_5[recent_5["low"] < last_low + tolerance]
+            if not sweep_candle.empty:
+                sweep_vol = sweep_candle["volume"].max()
+                if (sweep_vol > avg_volume * 1.5 and
+                        current_price > last_low * 0.997):
+                    sell_swept = True
 
         return {
-            "buy_swept":  buy_swept,
-            "sell_swept": sell_swept,
+            "buy_swept":   buy_swept,
+            "sell_swept":  sell_swept,
             "buy_levels":  buy_liq[-3:] if buy_liq else [],
             "sell_levels": sell_liq[-3:] if sell_liq else [],
         }
-    except:
+    except Exception as e:
+        track_error("detect_liquidity", e)
         return {"buy_swept": False, "sell_swept": False,
                 "buy_levels": [], "sell_levels": []}
 
@@ -433,60 +514,67 @@ def detect_fvg(df, lookback=30):
                     })
 
         return fvgs
-    except:
+    except Exception as e:
+        track_error("detect_fvg", e)
         return []
 
 
 # ─────────────────────────────────────────────
-#  SMART MONEY SCORE — 8 Points
+#  SMART MONEY SCORE — FIX #10
 # ─────────────────────────────────────────────
 def smart_money_score(structure_5m, structure_1m, liq, obs, fvgs):
     points    = 0
     direction = None
     reasons   = []
 
-    # 1. 5m Structure (2 points) — Direction
     if structure_5m == "BULL":
-        points += 2; direction = "BUY"
+        points += 2
+        direction = "BUY"
         reasons.append("5m BULL (+2)")
     elif structure_5m == "BEAR":
-        points += 2; direction = "SELL"
+        points += 2
+        direction = "SELL"
         reasons.append("5m BEAR (+2)")
     else:
-        reasons.append("5m RANGE — WAIT")
-        return 0, "WAIT", reasons
+        reasons.append("5m RANGE (0) — waiting for breakout confirmation")
+        if structure_1m == "BULL":
+            direction = "BUY"
+        elif structure_1m == "BEAR":
+            direction = "SELL"
 
-    # 2. 1m Structure confirm (1 point)
-    if (direction == "BUY"  and structure_1m == "BULL") or \
-       (direction == "SELL" and structure_1m == "BEAR"):
-        points += 1
-        reasons.append(f"1m confirms {direction} (+1)")
-    else:
-        reasons.append(f"1m not confirming (0)")
+    if direction is not None:
+        if (direction == "BUY"  and structure_1m == "BULL") or \
+           (direction == "SELL" and structure_1m == "BEAR"):
+            points += 1
+            reasons.append(f"1m confirms {direction} (+1)")
+        else:
+            reasons.append(f"1m not confirming (0)")
 
-    # 3. Order Block hit (2 points)
     if direction == "BUY":
         ob_hit = [ob for ob in obs["bullish_obs"] if ob["price_in_ob"]]
         if ob_hit:
-            best_ob = sorted(ob_hit, key=lambda x: x["fresh"],
+            best_ob = sorted(ob_hit,
+                             key=lambda x: (x["fresh"], x["strength"]),
                              reverse=True)[0]
             points += 2
             reasons.append(
-                f"Bullish OB {best_ob['bottom']:.2f}-{best_ob['top']:.2f} (+2)")
+                f"Bullish OB {best_ob['bottom']:.2f}-{best_ob['top']:.2f} "
+                f"str={best_ob['strength']} (+2)")
         else:
             reasons.append("No Bullish OB (0)")
-    else:
+    elif direction == "SELL":
         ob_hit = [ob for ob in obs["bearish_obs"] if ob["price_in_ob"]]
         if ob_hit:
-            best_ob = sorted(ob_hit, key=lambda x: x["fresh"],
+            best_ob = sorted(ob_hit,
+                             key=lambda x: (x["fresh"], x["strength"]),
                              reverse=True)[0]
             points += 2
             reasons.append(
-                f"Bearish OB {best_ob['bottom']:.2f}-{best_ob['top']:.2f} (+2)")
+                f"Bearish OB {best_ob['bottom']:.2f}-{best_ob['top']:.2f} "
+                f"str={best_ob['strength']} (+2)")
         else:
             reasons.append("No Bearish OB (0)")
 
-    # 4. Liquidity Swept (2 points)
     if direction == "BUY" and liq["sell_swept"]:
         points += 2
         reasons.append("Sell liquidity swept (+2)")
@@ -496,23 +584,28 @@ def smart_money_score(structure_5m, structure_1m, liq, obs, fvgs):
     else:
         reasons.append("No liquidity sweep (0)")
 
-    # 5. FVG retest (1 point)
     if direction == "BUY":
         bull_fvg = [f for f in fvgs if f["type"] == "BULL" and f["retest"]]
         if bull_fvg:
             points += 1
             reasons.append(
-                f"Bull FVG {bull_fvg[-1]['bottom']:.2f}-{bull_fvg[-1]['top']:.2f} (+1)")
+                f"Bull FVG {bull_fvg[-1]['bottom']:.2f}-"
+                f"{bull_fvg[-1]['top']:.2f} (+1)")
         else:
             reasons.append("No Bull FVG retest (0)")
-    else:
+    elif direction == "SELL":
         bear_fvg = [f for f in fvgs if f["type"] == "BEAR" and f["retest"]]
         if bear_fvg:
             points += 1
             reasons.append(
-                f"Bear FVG {bear_fvg[-1]['bottom']:.2f}-{bear_fvg[-1]['top']:.2f} (+1)")
+                f"Bear FVG {bear_fvg[-1]['bottom']:.2f}-"
+                f"{bear_fvg[-1]['top']:.2f} (+1)")
         else:
             reasons.append("No Bear FVG retest (0)")
+
+    if direction is None:
+        reasons.append("No direction — WAIT")
+        return 0, "WAIT", reasons
 
     reasons.append(f"Total: {points}/8")
     return points, direction, reasons
@@ -545,6 +638,7 @@ trade_state = {
     "last_price":   0.0,
     "last_points":  0,
     "last_tp_zone": "",
+    "last_atr":     0.0,
 }
 
 def update_state(**kwargs):
@@ -587,16 +681,13 @@ def run_periodic_update():
                 pnl      = calc_pnl(position, entry, price, psize)
                 dur      = str(datetime.now() - etime).split(".")[0]
                 pnl_icon = "+" if pnl >= 0 else ""
-
                 if position == "BUY":
                     tp_dist = ((tp - price) / price) * 100
                     sl_dist = ((price - sl) / price) * 100
                 else:
                     tp_dist = ((price - tp) / price) * 100
                     sl_dist = ((sl - price) / price) * 100
-
                 tp_zone_line = f"\nTP Zone : {tp_zone}" if tp_zone else ""
-
                 send_telegram(
                     f"--- SCALP UPDATE ---\n"
                     f"Time    : {now}\n"
@@ -622,73 +713,74 @@ def run_periodic_update():
                     f"Status  : Next scalp ka wait...\n"
                     f"--------------------"
                 )
-
         except Exception as e:
-            print(f"[UPDATE ERROR] {e}")
+            track_error("run_periodic_update", e)
         time.sleep(UPDATE_INTERVAL)
 
 
 # ─────────────────────────────────────────────
-#  DAILY REPORT
+#  DAILY REPORT — FIX #9
 # ─────────────────────────────────────────────
 def run_daily_report():
+    last_report_date = None
     while True:
         try:
-            ist  = timezone(timedelta(hours=5, minutes=30))
-            now  = datetime.now(ist)
+            ist = timezone(timedelta(hours=5, minutes=30))
+            now = datetime.now(ist)
             if now.hour == 23 and now.minute == 59:
-                daily   = get_daily_stats()
-                overall = get_overall_stats()
-                if daily:
-                    send_telegram(
-                        f"--- SCALP DAILY ---\n"
-                        f"Date     : {now.strftime('%d/%m/%Y')}\n"
-                        f"Trades   : {daily['total']}\n"
-                        f"Win      : {daily['wins']}\n"
-                        f"Loss     : {daily['losses']}\n"
-                        f"Win Rate : {daily['win_rate']}%\n"
-                        f"PnL      : {daily['pnl']:+.4f} USDT\n"
-                        f"Capital  : {daily['capital']:.4f} USDT\n"
-                        f"Best     : +{daily['best']:.4f} USDT\n"
-                        f"Worst    : {daily['worst']:.4f} USDT\n"
-                        f"--------------------\n"
-                        f"OVERALL:\n"
-                        f"Trades   : {overall['total']}\n"
-                        f"Win Rate : {overall['win_rate']}%\n"
-                        f"Total PnL: {overall['pnl']:+.4f} USDT\n"
-                        f"Capital  : {overall['capital']:.4f} USDT\n"
-                        f"--------------------"
-                    )
-                else:
-                    send_telegram(
-                        f"--- SCALP DAILY ---\n"
-                        f"Aaj koi scalp trade nahi hua\n"
-                        f"--------------------"
-                    )
-                time.sleep(70)
+                today_date = now.date()
+                if last_report_date != today_date:
+                    last_report_date = today_date
+                    daily   = get_daily_stats()
+                    overall = get_overall_stats()
+                    if daily and overall:
+                        send_telegram(
+                            f"--- SCALP DAILY ---\n"
+                            f"Date     : {now.strftime('%d/%m/%Y')}\n"
+                            f"Trades   : {daily['total']}\n"
+                            f"Win      : {daily['wins']}\n"
+                            f"Loss     : {daily['losses']}\n"
+                            f"Win Rate : {daily['win_rate']}%\n"
+                            f"PnL      : {daily['pnl']:+.4f} USDT\n"
+                            f"Capital  : {daily['capital']:.4f} USDT\n"
+                            f"Best     : +{daily['best']:.4f} USDT\n"
+                            f"Worst    : {daily['worst']:.4f} USDT\n"
+                            f"--------------------\n"
+                            f"OVERALL:\n"
+                            f"Trades   : {overall['total']}\n"
+                            f"Win Rate : {overall['win_rate']}%\n"
+                            f"Total PnL: {overall['pnl']:+.4f} USDT\n"
+                            f"Capital  : {overall['capital']:.4f} USDT\n"
+                            f"--------------------"
+                        )
+                    else:
+                        send_telegram(
+                            f"--- SCALP DAILY ---\n"
+                            f"Aaj koi scalp trade nahi hua\n"
+                            f"--------------------"
+                        )
         except Exception as e:
-            print(f"[DAILY ERROR] {e}")
+            track_error("run_daily_report", e)
         time.sleep(30)
 
 
 # ─────────────────────────────────────────────
-#  DECISION ENGINE
+#  DECISION ENGINE — FIX #3
 # ─────────────────────────────────────────────
 def run_decision_engine():
     exchange = get_exchange()
-    print("[SCALP DECISION] v3.0 started — 24/7")
+    print("[SCALP DECISION] v3.0 Fixed started — 24/7")
 
     while True:
         try:
             scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            # Fetch data
             bars_5m = safe_fetch_ohlcv(exchange, SYMBOL, "5m", 100)
             time.sleep(0.5)
             bars_1m = safe_fetch_ohlcv(exchange, SYMBOL, "1m", 100)
 
             if bars_5m is None or bars_1m is None:
-                print(f"[DECISION] Data fetch fail — retry 30s")
+                print("[DECISION] Data fetch fail — retry 30s")
                 time.sleep(30)
                 continue
 
@@ -698,7 +790,7 @@ def run_decision_engine():
                 bars_1m, columns=["time","open","high","low","close","volume"])
 
             if len(df_5m) < 20 or len(df_1m) < 20:
-                print(f"[DECISION] Data insufficient")
+                print("[DECISION] Data insufficient")
                 time.sleep(30)
                 continue
 
@@ -708,11 +800,11 @@ def run_decision_engine():
             current_price = float(df_1m["close"].iloc[-1])
             atr           = calc_atr(df_1m, ATR_PERIOD)
 
-            structure_5m  = detect_structure(df_5m, swing_bars=2)
-            structure_1m  = detect_structure(df_1m, swing_bars=2)
-            liq           = detect_liquidity(df_1m, lookback=40)
-            obs           = detect_order_blocks(df_1m, lookback=40)
-            fvgs          = detect_fvg(df_1m, lookback=30)
+            structure_5m = detect_structure(df_5m, swing_bars=2)
+            structure_1m = detect_structure(df_1m, swing_bars=2)
+            liq          = detect_liquidity(df_1m, lookback=40)
+            obs          = detect_order_blocks(df_1m, lookback=40)
+            fvgs         = detect_fvg(df_1m, lookback=30)
 
             points, direction, reasons = smart_money_score(
                 structure_5m, structure_1m, liq, obs, fvgs
@@ -720,7 +812,6 @@ def run_decision_engine():
 
             confidence = int((points / 8) * 100)
 
-            # 4/8 aur 5/8 par WAIT
             if points >= MIN_SCORE and direction == "BUY":
                 signal = "BUY"
             elif points >= MIN_SCORE and direction == "SELL":
@@ -731,43 +822,51 @@ def run_decision_engine():
             print(f"[SCALP] {scan_time} | {points}/8 | {signal} | "
                   f"ATR={atr:.2f} | Price={current_price:.2f}")
 
-            with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-                f.write(
-                    f"SIGNAL:{signal}\n"
-                    f"CONFIDENCE:{confidence}\n"
-                    f"SCORE:{points}\n"
-                    f"ATR:{round(atr, 4)}\n"
-                    f"TIME:{scan_time}\n"
-                    f"REASON:{' | '.join(reasons)}\n"
-                )
+            signal_data = {
+                "signal":     signal,
+                "confidence": confidence,
+                "score":      points,
+                "atr":        round(atr, 4),
+                "time":       scan_time,
+                "reasons":    reasons,
+            }
+            if not signal_queue.empty():
+                try:
+                    signal_queue.get_nowait()
+                except Empty:
+                    pass
+            signal_queue.put(signal_data)
 
             update_state(
                 last_signal=signal,
                 last_conf=confidence,
                 last_points=points,
                 last_price=current_price,
+                last_atr=atr,
             )
 
-            # Log
             try:
-                with open(LOG_FILE, "r", encoding="utf-8") as f:
-                    log = json.load(f)
-            except:
-                log = []
-            log.append({
-                "time":    scan_time,
-                "signal":  signal,
-                "points":  points,
-                "atr":     round(atr, 4),
-                "price":   current_price,
-                "reasons": reasons,
-            })
-            log = log[-3000:]
-            with open(LOG_FILE, "w", encoding="utf-8") as f:
-                json.dump(log, f, indent=2)
+                try:
+                    with open(LOG_FILE, "r", encoding="utf-8") as f:
+                        log = json.load(f)
+                except Exception:
+                    log = []
+                log.append({
+                    "time":    scan_time,
+                    "signal":  signal,
+                    "points":  points,
+                    "atr":     round(atr, 4),
+                    "price":   current_price,
+                    "reasons": reasons,
+                })
+                log = log[-3000:]
+                with open(LOG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(log, f, indent=2)
+            except Exception as e:
+                track_error("decision_log_write", e)
 
         except Exception as e:
-            print(f"[DECISION ERROR] {e}")
+            track_error("run_decision_engine", e)
             time.sleep(30)
 
         time.sleep(DECISION_SCAN)
@@ -779,6 +878,7 @@ def run_decision_engine():
 def run_execution_engine():
     ex           = get_exchange()
     capital      = load_capital()
+    initial_cap  = capital
     position     = None
     entry_price  = 0.0
     entry_time   = None
@@ -788,20 +888,13 @@ def run_execution_engine():
     capital_used = 0.0
     cooldown_end = None
 
-    # Signal file ka wait
     print("[SCALP EXECUTE] Waiting for first signal...")
-    while True:
-        try:
-            with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
-                if "SIGNAL:" in f.read():
-                    break
-        except:
-            pass
-        time.sleep(10)
+    while signal_queue.empty():
+        time.sleep(2)
 
-    print("[SCALP EXECUTE] v3.0 started!")
+    print("[SCALP EXECUTE] v3.0 Fixed started!")
     send_telegram(
-        f"SCALPING BOT v3.0 STARTED\n"
+        f"SCALPING BOT v3.0 FIXED STARTED\n"
         f"Capital  : {capital:.2f} USDT\n"
         f"Symbol   : {SYMBOL}\n"
         f"Mode     : Paper Trading\n"
@@ -810,29 +903,42 @@ def run_execution_engine():
         f"Capital% : {CAPITAL_USE_PCT}%\n"
         f"Min Score: {MIN_SCORE}/8\n"
         f"Max Hold : {MAX_HOLD_SECONDS//60} min\n"
+        f"Daily Loss Limit: {MAX_DAILY_LOSS_PCT}%\n"
         f"TP Zone  : {int(TP_EXIT_MIN_PCT*100)}-{int(TP_EXIT_MAX_PCT*100)}%"
     )
 
     while True:
         try:
-            # Signal padhna
-            try:
-                with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
-                    lines = f.read().splitlines()
-                data = {}
-                for line in lines:
-                    if ":" in line:
-                        k, v = line.split(":", 1)
-                        data[k.strip()] = v.strip()
-                signal     = data.get("SIGNAL", "WAIT")
-                confidence = int(data.get("CONFIDENCE", "0"))
-                score      = float(data.get("SCORE", "0"))
-                reason     = data.get("REASON", "")
-                atr        = float(data.get("ATR", "0"))
-            except:
-                signal, confidence, score, reason, atr = "WAIT", 0, 0.0, "", 0.0
+            # FIX #2 — Daily loss check
+            daily_pnl = get_daily_pnl()
+            daily_loss_pct = (abs(daily_pnl) / initial_cap) * 100 \
+                             if daily_pnl < 0 else 0.0
+            if daily_loss_pct >= MAX_DAILY_LOSS_PCT:
+                print(f"[RISK] Daily loss {daily_loss_pct:.2f}% — bot paused 1h")
+                send_telegram(
+                    f"DAILY LOSS LIMIT HIT\n"
+                    f"Loss    : {daily_pnl:.4f} USDT ({daily_loss_pct:.2f}%)\n"
+                    f"Bot paused for 1 hour."
+                )
+                time.sleep(3600)
+                initial_cap = capital
+                continue
 
-            # Price fetch
+            # FIX #3 — Queue se signal
+            try:
+                data = signal_queue.get_nowait()
+                signal     = data.get("signal", "WAIT")
+                confidence = data.get("confidence", 0)
+                score      = data.get("score", 0.0)
+                reason     = " | ".join(data.get("reasons", []))
+                atr        = data.get("atr", 0.0)
+            except Empty:
+                signal     = get_state("last_signal") or "WAIT"
+                confidence = get_state("last_conf") or 0
+                score      = get_state("last_points") or 0
+                atr        = get_state("last_atr") or 0.0
+                reason     = ""
+
             current_price = safe_fetch_ticker(ex, SYMBOL)
             if current_price is None:
                 time.sleep(EXECUTE_SCAN)
@@ -840,7 +946,6 @@ def run_execution_engine():
 
             now = datetime.now().strftime("%H:%M:%S")
 
-            # State update
             update_state(
                 last_price=current_price,
                 capital=capital,
@@ -853,7 +958,7 @@ def run_execution_engine():
                 capital_used=capital_used,
             )
 
-            # ── Max Hold Check ───────────────────
+            # Max Hold
             if position is not None and entry_time is not None:
                 held_secs = (datetime.now() - entry_time).seconds
                 if held_secs >= MAX_HOLD_SECONDS:
@@ -862,12 +967,9 @@ def run_execution_engine():
                     capital += pnl
                     duration = str(datetime.now() - entry_time).split(".")[0]
                     save_capital(capital)
-                    save_trade_history(
-                        position, entry_price, current_price,
-                        pnl, capital, duration, "Max Hold"
-                    )
-                    print(f"[MAX HOLD] {MAX_HOLD_SECONDS}s | "
-                          f"PnL={pnl:+.4f}")
+                    save_trade_history(position, entry_price, current_price,
+                                       pnl, capital, duration, "Max Hold")
+                    print(f"[MAX HOLD] {MAX_HOLD_SECONDS}s | PnL={pnl:+.4f}")
                     send_telegram(
                         f"SCALP CLOSED — Max Hold\n"
                         f"Side    : {position}\n"
@@ -877,12 +979,8 @@ def run_execution_engine():
                         f"Capital : {capital:.4f} USDT\n"
                         f"Time    : {duration}"
                     )
-                    position     = None
-                    entry_price  = 0.0
-                    entry_time   = None
-                    pos_size     = 0.0
-                    sl_price     = 0.0
-                    tp_price     = 0.0
+                    position     = None; entry_price = 0.0; entry_time  = None
+                    pos_size     = 0.0;  sl_price    = 0.0;  tp_price   = 0.0
                     capital_used = 0.0
                     cooldown_end = time.time() + COOLDOWN
                     update_state(position=None, capital_used=0.0,
@@ -890,17 +988,17 @@ def run_execution_engine():
                     time.sleep(EXECUTE_SCAN)
                     continue
 
-            # ── TP Zone Check 70-90% ─────────────
+            # TP Zone 70-90%
             if position is not None:
                 try:
                     if position == "BUY":
-                        tp_range  = tp_price - entry_price
-                        tp_prog   = (current_price - entry_price) / tp_range \
-                                    if tp_range != 0 else 0
+                        tp_range = tp_price - entry_price
+                        tp_prog  = (current_price - entry_price) / tp_range \
+                                   if tp_range != 0 else 0
                     else:
-                        tp_range  = entry_price - tp_price
-                        tp_prog   = (entry_price - current_price) / tp_range \
-                                    if tp_range != 0 else 0
+                        tp_range = entry_price - tp_price
+                        tp_prog  = (entry_price - current_price) / tp_range \
+                                   if tp_range != 0 else 0
 
                     if TP_EXIT_MIN_PCT <= tp_prog <= TP_EXIT_MAX_PCT:
                         pts = get_state("last_points")
@@ -910,10 +1008,8 @@ def run_execution_engine():
                             capital += pnl
                             duration = str(datetime.now() - entry_time).split(".")[0]
                             save_capital(capital)
-                            save_trade_history(
-                                position, entry_price, current_price,
-                                pnl, capital, duration, "Early Exit"
-                            )
+                            save_trade_history(position, entry_price, current_price,
+                                               pnl, capital, duration, "Early Exit")
                             update_state(
                                 last_tp_zone=f"TP {tp_prog*100:.0f}% exit | "
                                              f"Score={pts}/8 | PnL={pnl:+.4f}"
@@ -929,12 +1025,8 @@ def run_execution_engine():
                                 f"Zone  : {tp_prog*100:.0f}%\n"
                                 f"Score : {pts}/8 weak"
                             )
-                            position     = None
-                            entry_price  = 0.0
-                            entry_time   = None
-                            pos_size     = 0.0
-                            sl_price     = 0.0
-                            tp_price     = 0.0
+                            position     = None; entry_price = 0.0; entry_time  = None
+                            pos_size     = 0.0;  sl_price    = 0.0;  tp_price   = 0.0
                             capital_used = 0.0
                             cooldown_end = time.time() + COOLDOWN
                             update_state(position=None, capital_used=0.0,
@@ -949,31 +1041,39 @@ def run_execution_engine():
                     else:
                         update_state(last_tp_zone="")
                 except Exception as e:
-                    print(f"[TP ZONE ERROR] {e}")
+                    track_error("tp_zone_check", e)
 
-            # ── Trailing SL ──────────────────────
+            # FIX #6 — ATR-based Trailing SL
             if position is not None:
                 try:
-                    if position == "BUY":
-                        p_pct = ((current_price - entry_price) /
-                                 entry_price) * 100
-                        if p_pct >= 0.3:
-                            new_sl = current_price * (1 - 0.2 / 100)
-                            if new_sl > sl_price:
-                                sl_price = new_sl
-                                update_state(sl_price=sl_price)
-                    elif position == "SELL":
-                        p_pct = ((entry_price - current_price) /
-                                 entry_price) * 100
-                        if p_pct >= 0.3:
-                            new_sl = current_price * (1 + 0.2 / 100)
-                            if new_sl < sl_price:
-                                sl_price = new_sl
-                                update_state(sl_price=sl_price)
-                except Exception as e:
-                    print(f"[TRAIL ERROR] {e}")
+                    current_atr = get_state("last_atr") or atr
+                    if current_atr > 0 and current_price > 0:
+                        trail_dist_pct = (current_atr * 0.5 / current_price) * 100
+                    else:
+                        trail_dist_pct = 0.2
 
-            # ── SL/TP Check ──────────────────────
+                    if position == "BUY":
+                        p_pct = ((current_price - entry_price) / entry_price) * 100
+                        if p_pct >= 0.3:
+                            new_sl = current_price * (1 - trail_dist_pct / 100)
+                            if new_sl > sl_price:
+                                old_sl   = sl_price
+                                sl_price = new_sl
+                                update_state(sl_price=sl_price)
+                                print(f"[TRAIL] BUY SL {old_sl:.2f} → {sl_price:.2f}")
+                    elif position == "SELL":
+                        p_pct = ((entry_price - current_price) / entry_price) * 100
+                        if p_pct >= 0.3:
+                            new_sl = current_price * (1 + trail_dist_pct / 100)
+                            if new_sl < sl_price:
+                                old_sl   = sl_price
+                                sl_price = new_sl
+                                update_state(sl_price=sl_price)
+                                print(f"[TRAIL] SELL SL {old_sl:.2f} → {sl_price:.2f}")
+                except Exception as e:
+                    track_error("trailing_sl", e)
+
+            # SL / TP Check
             if position is not None:
                 hit_sl = (position == "BUY"  and current_price <= sl_price) or \
                          (position == "SELL" and current_price >= sl_price)
@@ -987,10 +1087,8 @@ def run_execution_engine():
                     capital += pnl
                     duration = str(datetime.now() - entry_time).split(".")[0]
                     save_capital(capital)
-                    save_trade_history(
-                        position, entry_price, current_price,
-                        pnl, capital, duration, label
-                    )
+                    save_trade_history(position, entry_price, current_price,
+                                       pnl, capital, duration, label)
                     print(f"[SCALP] {label} | {position} | "
                           f"PnL={pnl:+.4f} | Capital={capital:.4f}")
                     send_telegram(
@@ -1002,12 +1100,8 @@ def run_execution_engine():
                         f"Capital : {capital:.4f} USDT\n"
                         f"Time    : {duration}"
                     )
-                    position     = None
-                    entry_price  = 0.0
-                    entry_time   = None
-                    pos_size     = 0.0
-                    sl_price     = 0.0
-                    tp_price     = 0.0
+                    position     = None; entry_price = 0.0; entry_time  = None
+                    pos_size     = 0.0;  sl_price    = 0.0;  tp_price   = 0.0
                     capital_used = 0.0
                     cooldown_end = time.time() + COOLDOWN
                     update_state(position=None, capital_used=0.0,
@@ -1015,19 +1109,16 @@ def run_execution_engine():
                     time.sleep(EXECUTE_SCAN)
                     continue
 
-            # ── Cooldown Check ───────────────────
+            # Cooldown
             if cooldown_end is not None and time.time() < cooldown_end:
                 remaining = int(cooldown_end - time.time())
-                print(f"[{now}] Cooldown {remaining}s | "
-                      f"Price={current_price:.2f}")
+                print(f"[{now}] Cooldown {remaining}s | Price={current_price:.2f}")
                 time.sleep(EXECUTE_SCAN)
                 continue
 
-            # ── Entry Check ──────────────────────
+            # Entry
             if position is None:
                 if signal in ["BUY", "SELL"] and int(score) >= MIN_SCORE:
-
-                    # ATR based SL/TP
                     if atr > 0:
                         sl_pct = (atr * ATR_SL_MULT / current_price) * 100
                         tp_pct = (atr * ATR_TP_MULT / current_price) * 100
@@ -1035,7 +1126,6 @@ def run_execution_engine():
                         sl_pct = 0.3
                         tp_pct = 0.3
 
-                    # 90% capital use
                     capital_used = capital * (CAPITAL_USE_PCT / 100)
                     pos_size     = (capital_used * LEVERAGE) / current_price
                     entry_price  = current_price
@@ -1055,7 +1145,6 @@ def run_execution_engine():
                           f"SL={sl_price:.2f} | "
                           f"TP={tp_price:.2f} | "
                           f"Score={int(score)}/8")
-
                     send_telegram(
                         f"SCALP OPENED\n"
                         f"Side    : {position}\n"
@@ -1070,18 +1159,14 @@ def run_execution_engine():
                 else:
                     print(f"[{now}] WAIT | Score={int(score)}/8 | "
                           f"Price={current_price:.2f}")
-
-            # ── Holding ──────────────────────────
             else:
-                pnl_now = calc_pnl(position, entry_price,
-                                   current_price, pos_size)
+                pnl_now = calc_pnl(position, entry_price, current_price, pos_size)
                 print(f"[{now}] Holding {position} | "
-                      f"PnL={pnl_now:+.4f} | "
-                      f"Price={current_price:.2f}")
+                      f"PnL={pnl_now:+.4f} | Price={current_price:.2f}")
 
         except Exception as e:
             err_msg = str(e)
-            print(f"[EXECUTE ERROR] {err_msg}")
+            track_error("run_execution_engine", e)
             if "429" in err_msg or "Too Many" in err_msg:
                 print("[RATE LIMIT] 60s wait...")
                 time.sleep(60)
@@ -1099,38 +1184,29 @@ def run_execution_engine():
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 55)
-    print("  SCALPING BOT v3.0 — Perfect Edition")
+    print("  SCALPING BOT v3.0 — Fixed Edition")
     print("  Strategy : Smart Money 24/7")
     print("  Min Score: 6/8")
     print("  Capital  : 90%")
     print("  TP Zone  : 70-90%")
+    print("  Fixes    : #1 #2 #3 #4 #5 #6 #7 #8 #9 #10")
     print("=" * 55)
 
-    t1 = threading.Thread(target=run_server)
-    t1.daemon = True
-    t1.start()
+    t1 = threading.Thread(target=run_server,           daemon=True)
+    t2 = threading.Thread(target=run_decision_engine,  daemon=True)
+    t3 = threading.Thread(target=run_execution_engine, daemon=True)
+    t4 = threading.Thread(target=run_periodic_update,  daemon=True)
+    t5 = threading.Thread(target=run_daily_report,     daemon=True)
 
-    t2 = threading.Thread(target=run_decision_engine)
-    t2.daemon = True
-    t2.start()
-
-    t3 = threading.Thread(target=run_execution_engine)
-    t3.daemon = True
-    t3.start()
-
-    t4 = threading.Thread(target=run_periodic_update)
-    t4.daemon = True
-    t4.start()
-
-    t5 = threading.Thread(target=run_daily_report)
-    t5.daemon = True
-    t5.start()
+    for t in [t1, t2, t3, t4, t5]:
+        t.start()
 
     print("[INFO] All engines started!")
     print("[INFO] Flask    : port 8081")
-    print("[INFO] Decision : har 60s")
+    print("[INFO] Decision : har 60s  (Queue-based)")
     print("[INFO] Execute  : har 8s")
     print("[INFO] Max Hold : 3 min")
+    print("[INFO] Daily SL : 5%")
     print("[INFO] 24/7     : ON")
 
     while True:
