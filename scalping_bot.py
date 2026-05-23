@@ -39,8 +39,8 @@ load_dotenv()
 
 API_KEY    = os.getenv("BINANCE_API_KEY", "")
 API_SECRET = os.getenv("BINANCE_SECRET", "")
-BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
+BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "8161773850:AAFcWw3UnlSe2TrMooB2uvgZQZUqIW0zW2w")
+CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "7102976298")
 
 if not all([API_KEY, API_SECRET, BOT_TOKEN, CHAT_ID]):
     print("[WARN] .env mein kuch keys missing hain — check karo!")
