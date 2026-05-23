@@ -1,4 +1,3 @@
-
 """
 SCALPING BOT v4.0 — Full Upgrade Edition
 Strategy  : Smart Money (OB + Liquidity + FVG)
