@@ -1,3 +1,12 @@
+main.py — Scalping Bot v5.0
+python
+·
+532 lines
+
+
+
+
+
 """
 SCALPING BOT v5.0 — CoinGecko Edition
 Exchange  : No Exchange needed!
@@ -36,19 +45,19 @@ CAPITAL          = 105.0
 CAPITAL_USE_PCT  = 90
 LEVERAGE         = 10
 MIN_SCORE        = 6
-MAX_DAILY_LOSS   = 5.0     # 5% daily loss limit
-COOLDOWN_SEC     = 120     # 2 min cooldown between trades
-MAX_HOLD_SEC     = 300     # 5 min max hold
-TP_PCT           = 0.8     # 0.8% TP
-SL_PCT           = 0.4     # 0.4% SL
-SCAN_INTERVAL    = 60      # har 60 sec scan
-UPDATE_INTERVAL  = 1800    # har 30 min update
+MAX_DAILY_LOSS   = 5.0
+COOLDOWN_SEC     = 120
+MAX_HOLD_SEC     = 300
+TP_PCT           = 0.8
+SL_PCT           = 0.4
+SCAN_INTERVAL    = 60
+UPDATE_INTERVAL  = 1800
 
 TRADE_HISTORY = "trade_history.json"
 CAPITAL_FILE  = "capital.json"
 
 # ─────────────────────────────────────────────
-#  FLASK SERVER (Render ke liye)
+#  FLASK SERVER
 # ─────────────────────────────────────────────
 app = Flask(__name__)
 
@@ -83,18 +92,16 @@ def send_telegram(message):
 #  COINGECKO — REAL ETH PRICE
 # ─────────────────────────────────────────────
 def get_eth_price():
-    """CoinGecko se real ETH/USDT price lo — Free, No API Key!"""
     try:
         url = "https://api.coingecko.com/api/v3/simple/price"
         params = {
             "ids": "ethereum",
             "vs_currencies": "usd",
             "include_24hr_change": "true",
-            "include_24hr_vol": "true",
         }
         r = requests.get(url, params=params, timeout=10)
         data = r.json()
-        price     = float(data["ethereum"]["usd"])
+        price      = float(data["ethereum"]["usd"])
         change_24h = float(data["ethereum"]["usd_24h_change"])
         return price, change_24h
     except Exception as e:
@@ -103,14 +110,11 @@ def get_eth_price():
 
 
 def get_eth_ohlc():
-    """CoinGecko se ETH OHLC data lo (last 1 day, hourly)"""
     try:
         url = "https://api.coingecko.com/api/v3/coins/ethereum/ohlc"
         params = {"vs_currency": "usd", "days": "1"}
         r = requests.get(url, params=params, timeout=15)
-        data = r.json()
-        # data = [[timestamp, open, high, low, close], ...]
-        return data
+        return r.json()
     except Exception as e:
         print(f"[OHLC ERROR] {e}")
         return None
@@ -120,12 +124,6 @@ def get_eth_ohlc():
 #  SIGNAL ANALYSIS
 # ─────────────────────────────────────────────
 def analyze_market(price, change_24h, ohlc_data):
-    """
-    Simple Smart Money analysis:
-    - 24h trend direction
-    - Recent price momentum
-    - OHLC structure
-    """
     score     = 0
     direction = None
     reasons   = []
@@ -153,53 +151,50 @@ def analyze_market(price, change_24h, ohlc_data):
     # Rule 2 — OHLC Analysis
     if ohlc_data and len(ohlc_data) >= 4:
         recent = ohlc_data[-4:]
-        closes = [c[4] for c in recent]  # close prices
+        closes = [c[4] for c in recent]
 
-        # Consecutive candles check
         bull_candles = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i-1])
         bear_candles = sum(1 for i in range(1, len(closes)) if closes[i] < closes[i-1])
 
         if bull_candles >= 3 and (direction == "BUY" or direction is None):
             score += 2
             direction = "BUY"
-            reasons.append(f"3+ bull candles in a row (+2)")
+            reasons.append(f"3+ bull candles (+2)")
         elif bear_candles >= 3 and (direction == "SELL" or direction is None):
             score += 2
             direction = "SELL"
-            reasons.append(f"3+ bear candles in a row (+2)")
+            reasons.append(f"3+ bear candles (+2)")
 
-        # Recent momentum
         if len(closes) >= 2:
             momentum = ((closes[-1] - closes[-2]) / closes[-2]) * 100
             if momentum > 0.3 and direction == "BUY":
                 score += 1
-                reasons.append(f"Bullish momentum {momentum:.2f}% (+1)")
+                reasons.append(f"Bull momentum {momentum:.2f}% (+1)")
             elif momentum < -0.3 and direction == "SELL":
                 score += 1
-                reasons.append(f"Bearish momentum {momentum:.2f}% (+1)")
+                reasons.append(f"Bear momentum {momentum:.2f}% (+1)")
 
-        # High/Low analysis
         highs = [c[2] for c in recent]
         lows  = [c[3] for c in recent]
         if len(highs) >= 2:
             if highs[-1] > highs[-2] and lows[-1] > lows[-2] and direction == "BUY":
                 score += 1
-                reasons.append("Higher High + Higher Low (BUY +1)")
+                reasons.append("Higher High + Higher Low (+1)")
             elif highs[-1] < highs[-2] and lows[-1] < lows[-2] and direction == "SELL":
                 score += 1
-                reasons.append("Lower High + Lower Low (SELL +1)")
+                reasons.append("Lower High + Lower Low (+1)")
 
-    # Rule 3 — Volume/Volatility check
+    # Rule 3 — Volatility check
     if ohlc_data and len(ohlc_data) >= 2:
         last_candle = ohlc_data[-1]
-        candle_size = abs(last_candle[2] - last_candle[3])  # high - low
+        candle_size = abs(last_candle[2] - last_candle[3])
         candle_pct  = (candle_size / price) * 100
         if candle_pct < 0.05:
             score = max(0, score - 1)
-            reasons.append(f"Market too flat ({candle_pct:.3f}%) (-1)")
+            reasons.append(f"Market too flat (-1)")
         elif candle_pct > 3.0:
             score = max(0, score - 1)
-            reasons.append(f"Market too volatile ({candle_pct:.2f}%) (-1)")
+            reasons.append(f"Market too volatile (-1)")
 
     if direction is None:
         return 0, "WAIT", reasons
@@ -258,6 +253,17 @@ def save_trade(side, entry, exit_price, pnl, capital, duration, label):
         print(f"[HISTORY ERROR] {e}")
 
 
+def get_daily_pnl():
+    try:
+        with open(TRADE_HISTORY, "r") as f:
+            history = json.load(f)
+        today  = datetime.now().strftime("%d/%m/%Y")
+        trades = [t for t in history if t["date"] == today]
+        return sum(t["pnl"] for t in trades)
+    except Exception:
+        return 0.0
+
+
 def get_daily_stats():
     try:
         with open(TRADE_HISTORY, "r") as f:
@@ -280,17 +286,6 @@ def get_daily_stats():
         "worst":   round(min(t["pnl"] for t in trades), 4),
         "capital": trades[-1]["capital"],
     }
-
-
-def get_daily_pnl():
-    try:
-        with open(TRADE_HISTORY, "r") as f:
-            history = json.load(f)
-        today  = datetime.now().strftime("%d/%m/%Y")
-        trades = [t for t in history if t["date"] == today]
-        return sum(t["pnl"] for t in trades)
-    except Exception:
-        return 0.0
 
 
 # ─────────────────────────────────────────────
@@ -316,15 +311,10 @@ def run_daily_report():
                             f"Win Rate : {stats['win_rate']}%\n"
                             f"Daily PnL: {stats['pnl']:+.4f} USDT\n"
                             f"Capital  : {stats['capital']:.4f} USDT\n"
-                            f"Best     : +{stats['best']:.4f} USDT\n"
-                            f"Worst    : {stats['worst']:.4f} USDT\n"
                             f"────────────────────"
                         )
                     else:
-                        send_telegram(
-                            f"📊 DAILY REPORT — {now.strftime('%d/%m/%Y')}\n"
-                            f"Aaj koi trade nahi hua."
-                        )
+                        send_telegram("📊 DAILY REPORT\nAaj koi trade nahi hua.")
         except Exception as e:
             print(f"[DAILY REPORT ERROR] {e}")
         time.sleep(30)
@@ -343,8 +333,9 @@ def run_bot():
     sl_price     = 0.0
     tp_price     = 0.0
     cooldown_end = None
+    last_update  = time.time()
 
-    print("[BOT] Starting Scalping Bot v5.0...")
+    print("[BOT] Scalping Bot v5.0 started!")
     send_telegram(
         f"🚀 SCALPING BOT v5.0 STARTED\n"
         f"────────────────────\n"
@@ -360,18 +351,15 @@ def run_bot():
         f"────────────────────"
     )
 
-    last_update = time.time()
-
     while True:
         try:
             now_str = datetime.now().strftime("%H:%M:%S")
 
-            # ── Daily Loss Check ──
+            # Daily Loss Check
             daily_pnl = get_daily_pnl()
             if daily_pnl < 0:
                 loss_pct = (abs(daily_pnl) / initial_cap) * 100
                 if loss_pct >= MAX_DAILY_LOSS:
-                    print(f"[RISK] Daily loss {loss_pct:.2f}% — paused 1h")
                     send_telegram(
                         f"⛔ DAILY LOSS LIMIT HIT\n"
                         f"Loss : {daily_pnl:.4f} USDT ({loss_pct:.2f}%)\n"
@@ -381,20 +369,19 @@ def run_bot():
                     initial_cap = capital
                     continue
 
-            # ── Price Fetch ──
+            # Price Fetch
             price, change_24h = get_eth_price()
             if price is None:
-                print(f"[{now_str}] Price fetch failed — retry 30s")
                 time.sleep(30)
                 continue
 
-            # ── Periodic Update (har 30 min) ──
+            # Periodic Update
             if time.time() - last_update >= UPDATE_INTERVAL:
                 last_update = time.time()
                 if position is not None and entry_time is not None:
-                    pnl     = (price - entry_price) * pos_size if position == "BUY" \
-                              else (entry_price - price) * pos_size
-                    dur     = str(datetime.now() - entry_time).split(".")[0]
+                    pnl = (price - entry_price) * pos_size if position == "BUY" \
+                          else (entry_price - price) * pos_size
+                    dur = str(datetime.now() - entry_time).split(".")[0]
                     send_telegram(
                         f"📍 UPDATE\n"
                         f"Side    : {position}\n"
@@ -406,14 +393,14 @@ def run_bot():
                     )
                 else:
                     send_telegram(
-                        f"💤 STATUS UPDATE\n"
-                        f"Price   : ${price:.2f}\n"
+                        f"💤 STATUS\n"
+                        f"ETH     : ${price:.2f}\n"
                         f"24h     : {change_24h:+.2f}%\n"
                         f"Capital : {capital:.4f} USDT\n"
                         f"Status  : Waiting for signal..."
                     )
 
-            # ── Max Hold Check ──
+            # Max Hold Check
             if position is not None and entry_time is not None:
                 held = (datetime.now() - entry_time).seconds
                 if held >= MAX_HOLD_SEC:
@@ -424,24 +411,21 @@ def run_bot():
                     save_capital(capital)
                     save_trade(position, entry_price, price, pnl,
                                capital, duration, "Max Hold")
-                    print(f"[MAX HOLD] {position} | PnL={pnl:+.4f}")
                     send_telegram(
-                        f"⏰ TRADE CLOSED — Max Hold\n"
+                        f"⏰ CLOSED — Max Hold\n"
                         f"Side    : {position}\n"
                         f"Entry   : {entry_price:.2f}\n"
                         f"Exit    : {price:.2f}\n"
                         f"PnL     : {pnl:+.4f} USDT\n"
-                        f"Capital : {capital:.4f} USDT\n"
-                        f"Time    : {duration}"
+                        f"Capital : {capital:.4f} USDT"
                     )
                     position = None; entry_price = 0.0
                     entry_time = None; pos_size = 0.0
-                    sl_price = 0.0; tp_price = 0.0
                     cooldown_end = time.time() + COOLDOWN_SEC
                     time.sleep(SCAN_INTERVAL)
                     continue
 
-            # ── SL / TP Check ──
+            # SL / TP Check
             if position is not None:
                 hit_sl = (position == "BUY"  and price <= sl_price) or \
                          (position == "SELL" and price >= sl_price)
@@ -457,13 +441,12 @@ def run_bot():
                     save_capital(capital)
                     save_trade(position, entry_price, price, pnl,
                                capital, duration, label)
-                    print(f"[TRADE] {label} | {position} | PnL={pnl:+.4f} | Cap={capital:.4f}")
                     send_telegram(
                         f"{label}\n"
                         f"────────────────────\n"
                         f"Side    : {position}\n"
-                        f"Entry   : {entry_price:.2f}\n"
-                        f"Exit    : {price:.2f}\n"
+                        f"Entry   : ${entry_price:.2f}\n"
+                        f"Exit    : ${price:.2f}\n"
                         f"PnL     : {pnl:+.4f} USDT\n"
                         f"Capital : {capital:.4f} USDT\n"
                         f"Time    : {duration}\n"
@@ -471,30 +454,26 @@ def run_bot():
                     )
                     position = None; entry_price = 0.0
                     entry_time = None; pos_size = 0.0
-                    sl_price = 0.0; tp_price = 0.0
                     cooldown_end = time.time() + COOLDOWN_SEC
                     time.sleep(SCAN_INTERVAL)
                     continue
 
-            # ── Cooldown Check ──
+            # Cooldown Check
             if cooldown_end and time.time() < cooldown_end:
                 remaining = int(cooldown_end - time.time())
                 print(f"[{now_str}] Cooldown {remaining}s | ETH=${price:.2f}")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # ── Signal Analysis ──
+            # Signal Analysis
             if position is None:
                 ohlc = get_eth_ohlc()
-                time.sleep(2)  # CoinGecko rate limit respect
-
+                time.sleep(2)
                 score, signal, reasons = analyze_market(price, change_24h, ohlc)
                 reason_str = " | ".join(reasons)
-
                 print(f"[{now_str}] Score={score}/8 | {signal} | ETH=${price:.2f}")
 
                 if score >= MIN_SCORE and signal in ["BUY", "SELL"]:
-                    # Entry
                     capital_used = capital * (CAPITAL_USE_PCT / 100)
                     pos_size     = (capital_used * LEVERAGE) / price
                     entry_price  = price
@@ -508,8 +487,6 @@ def run_bot():
                         sl_price = entry_price * (1 + SL_PCT / 100)
                         tp_price = entry_price * (1 - TP_PCT / 100)
 
-                    print(f"[TRADE] OPENED {position} | Entry={entry_price:.2f} | "
-                          f"SL={sl_price:.2f} | TP={tp_price:.2f} | Score={score}/8")
                     send_telegram(
                         f"📈 TRADE OPENED\n"
                         f"────────────────────\n"
@@ -527,8 +504,7 @@ def run_bot():
             else:
                 pnl_now = (price - entry_price) * pos_size if position == "BUY" \
                           else (entry_price - price) * pos_size
-                print(f"[{now_str}] Holding {position} | "
-                      f"PnL={pnl_now:+.4f} | ETH=${price:.2f}")
+                print(f"[{now_str}] {position} | PnL={pnl_now:+.4f} | ETH=${price:.2f}")
 
         except Exception as e:
             print(f"[BOT ERROR] {e}")
@@ -554,11 +530,10 @@ if __name__ == "__main__":
     for t in [t1, t2, t3]:
         t.start()
 
-    print("[INFO] Flask server  : port 10000")
-    print("[INFO] Bot engine    : started")
-    print("[INFO] Daily report  : 23:59 IST")
-    print("[INFO] Price source  : CoinGecko")
-    print("[INFO] 24/7 ON!")
+    print("[INFO] Flask   : port 10000")
+    print("[INFO] Bot     : started")
+    print("[INFO] Report  : 23:59 IST")
+    print("[INFO] 24/7    : ON")
 
     while True:
         time.sleep(60)
