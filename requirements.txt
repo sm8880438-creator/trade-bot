@@ -1,5 +1,3 @@
-ccxt
-pandas
-numpy
-requests
 flask
+requests
+python-dotenv
